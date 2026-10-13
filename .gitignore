@@ -1,0 +1,26 @@
+# Build outputs and local caches
+/build/
+/cmake-build-*/
+/Debug/
+/Release/
+*.o
+*.obj
+*.elf
+*.hex
+*.bin
+*.map
+*.exe
+__pycache__/
+
+# Local IDE and agent settings
+/.idea/
+/.opencode/
+CMakeUserPresets.json
+
+# Local backups, experiments and reference attachments
+/backups/
+/tmp/
+/说明书/*.pdf
+/说明书/*.docx
+/说明书/*.png
+/说明书/*.eprj2
