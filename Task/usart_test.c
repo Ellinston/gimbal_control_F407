@@ -1,9 +1,12 @@
 #include "usart_test.h"
 #include "usart.h"
+#include <float.h>
 #include <math.h>
 #include <string.h>
 
 #define VOFA_PERIOD_MS 100U
+
+imu_vofa_data_t imu_vofa_data;
 
 motor_channel_t yaw_channel;
 motor_channel_t pitch_channel;
@@ -13,11 +16,19 @@ static uint8_t vofa_initialized;
 static uint8_t vofa_packet[20];
 static volatile HAL_StatusTypeDef vofa_tx_status = HAL_BUSY;
 static volatile uint32_t vofa_tx_submitted, vofa_tx_dropped;
+/* 调试器查看本次打包值及 vofa_packet[0..19]，不向 USART1 插入 printf。 */
+static volatile imu_vofa_data_t vofa_debug_sample;
 
 _Static_assert(sizeof(float) == 4U, "JustFloat requires 32-bit floats");
+_Static_assert(FLT_RADIX == 2 && FLT_MANT_DIG == 24 && FLT_MAX_EXP == 128 && FLT_MIN_EXP == -125,
+               "JustFloat requires binary32 float format");
+_Static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
+               "JustFloat memcpy packing requires little-endian byte order");
 
 void vofa_task_init(void)
 {
+    imu_vofa_data = (imu_vofa_data_t){NAN, NAN, NAN, NAN};
+    vofa_debug_sample = imu_vofa_data;
     yaw_channel = (motor_channel_t){0.0f, NAN, 0.0f, NAN};
     pitch_channel = yaw_channel;
     vofa_last_sample_ms = usart_GetTick();
@@ -41,10 +52,13 @@ void vofa_task_update(void)
         ++vofa_tx_dropped;
         return;
     }
-    const float channels[4] = {yaw_channel.target_angle, yaw_channel.current_angle,
-                               pitch_channel.target_angle, pitch_channel.current_angle};
-    /* STM32F407 为小端 IEEE754 float；不发送结构体填充或速度字段。 */
-    memcpy(vofa_packet, channels, sizeof(channels));
+    const imu_vofa_data_t sample = imu_vofa_data;
+    vofa_debug_sample = sample;
+    /* 逐通道写入固定偏移；上面的编译期检查保证32位float与小端字节序。 */
+    memcpy(&vofa_packet[0],  &sample.pitch_angle, 4U); /* CH0: Pitch deg */
+    memcpy(&vofa_packet[4],  &sample.yaw_angle,   4U); /* CH1: Yaw deg */
+    memcpy(&vofa_packet[8],  &sample.accel_x,     4U); /* CH2: Acc X m/s^2 */
+    memcpy(&vofa_packet[12], &sample.accel_y,     4U); /* CH3: Acc Y m/s^2 */
     vofa_packet[16] = 0x00U;
     vofa_packet[17] = 0x00U;
     vofa_packet[18] = 0x80U;

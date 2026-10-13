@@ -4,7 +4,7 @@
 
 ## 当前状态与资料
 
-**当前源码模式（2026-10-13 固定位置环 + VOFA）：main 初始化 `vofa_task_init()` 和 `Task_Position_Loop_Test_Init()`，循环依次调用 `Task_Position_Loop_Test()`、`vofa_task_update()`、`HAL_Delay(10)`。YAW ID1 目标30°、PITCH ID2 目标70°；首帧临时参考仍为YAW 0°、PITCH 100°。两轴独立 PID 参数和 target 集中在 [motor_task.h 顶部](Task/motor_task.h)，PID 输出及积分限幅均为1500。USART1 115200/8N1，每100ms门控发送四通道 JustFloat：YAW目标、YAW实际、PITCH目标、PITCH实际，单位度。ARM编译和主机模拟测试通过，未烧录、未实测。说明见 [PID 固定目标位置环](说明书/PID固定目标位置环.md)。原 [双轴往返位置测试](说明书/双轴位置环测试.md) 保留，当前不调度。**
+**当前源码模式（2026-10-13 IMU + VOFA 串口测试）：main 初始化 `IMU_TestInit()`、`vofa_task_init()`，通过 `IMU_TestSetTextOutput(0U)` 关闭文本；循环依次调用 `IMU_Angle_Test()`、`vofa_task_update()`、`HAL_Delay(10)`。USART1 115200/8N1，每100ms门控发送四通道 JustFloat：Pitch、Yaw（deg）、Acc X、Acc Y（m/s²）。数据来自现有 BMI270 采样和二轴解算，上电保持静止约2秒。ARM编译、串口协议和IMU合成输入联调测试通过，未烧录、未实测。详见 [IMU VOFA串口测试](说明书/IMU_VOFA串口测试.md)。电机任务保留但当前不调度。**
 
 历史固定1000单轴试验曾采集到正向9..12rpm，用户确认两次独立电机上电均自行启动，见 [固定1000运行记录](说明书/YAW固定1000运行.md)。这些证据仅适用于历史单轴固件。
 
@@ -14,9 +14,9 @@
 - 电机依据：[RoboMaster GM6020 使用说明，2023-10-13 / v1.4](说明书/RoboMaster%20GM6020直流无刷电机使用说明20231013.pdf)，覆盖 CAN 协议、拨码 ID、控制模式与使用条件。
 - 考核依据：[鲸麟战队 26 招新完整形态考核](说明书/鲸麟战队26招新%20完整形态考核.docx)，以其中电控组要求为最终验收目标。
 - 已完成串口和 BMI270 驱动；2026-10-12 使用 ARM GCC 13.3.1、CMake 和 Ninja 编译链接，并通过 ST-Link/OpenOCD 烧录、校验和复位，产物为 `build/Debug/gimbal_1.elf`。串口及 IMU 已通过 COM6 实物检查，详细证据见 [IMU 模块验收](说明书/IMU模块验收.md)。
-- USART1 中断收发及 `PING\n → PONG\n` 测试源码保留，当前仅调度 `Task/usart_test` 中的 VOFA 任务，不调度 PING 测试。BMI270 完整驱动位于 [device/BMI270](device/BMI270)，IMU Task 源码保留。串口接口见 [串口模块验收](说明书/串口模块验收.md)。当前位置环仅输出四通道 JustFloat，不混入文本、不处理串口命令；位置/速度 PID 已实现，实机调参待完成。
+- USART1 中断收发及 `PING\n → PONG\n` 测试源码保留，当前调度 IMU 角度任务及 `Task/usart_test` 中的 VOFA 任务，不调度 PING 测试。BMI270 完整驱动位于 [device/BMI270](device/BMI270)。串口接口见 [串口模块验收](说明书/串口模块验收.md)。当前只输出四通道 JustFloat，不混入启动诊断或周期文本、不处理串口命令。
 
-电机驱动与任务接口见 [电机模块接口](说明书/电机模块接口.md)：`motor.c` 提供 GM6020 电压组帧和反馈解析，`motor_control.c` 提供速度/角度及 `Motor_PID_Control` 接口；当前 `Task/motor_task.c/.h` 中的固定目标位置任务独占调度。旧开环、固定1000、单轴 PID 和双轴往返测试源码保留，不能同时调度。
+电机驱动与任务接口见 [电机模块接口](说明书/电机模块接口.md)：`motor.c` 提供 GM6020 电压组帧和反馈解析，`motor_control.c` 提供速度/角度及 `Motor_PID_Control` 接口；[固定目标位置任务](说明书/PID固定目标位置环.md)、旧开环、固定1000、单轴 PID 和双轴往返测试源码保留，当前均不调度。
 
 ## 协作方法
 

@@ -83,7 +83,6 @@ static void position_sample(float yaw, float pitch)
 {
     inject(0U, yaw, 0); inject(1U, pitch - 100.0f, 0);
     Position_Loop_Task.Update();
-    vofa_task_update();
 }
 
 static void position_start(void)
@@ -111,15 +110,11 @@ static void test_position_loop(void)
     assert(Motor_Get_Status(YAW_MOTOR)->target_angle_deg == 30.0f);
     assert(Motor_Get_Status(PITCH_MOTOR)->target_angle_deg == 70.0f);
     tick = 100U; position_sample(0.0f, 100.0f);
-    assert(inflight_length == 20U && double_motor_status.log_submitted == 0U);
-    float channels[4]; memcpy(channels, inflight, sizeof(channels));
-    assert(channels[0] == 30.0f && channels[1] == 0.0f && channels[2] == 70.0f && channels[3] == 100.0f);
-    const uint8_t tail[4] = {0U, 0U, 0x80U, 0x7FU};
-    assert(memcmp(inflight + 16U, tail, sizeof(tail)) == 0);
-    uint8_t snapshot[20]; memcpy(snapshot, inflight, sizeof(snapshot));
+    assert(inflight == NULL && double_motor_status.log_submitted == 0U);
+    assert(yaw_channel.target_angle == 30.0f && yaw_channel.current_angle == 0.0f);
+    assert(pitch_channel.target_angle == 70.0f && pitch_channel.current_angle == 100.0f);
     tick = 200U; position_sample(1.0f, 99.0f);
-    assert(memcmp(snapshot, inflight, sizeof(snapshot)) == 0);
-    huart1.gState = HAL_UART_STATE_READY;
+    assert(inflight == NULL);
     for (tick = 210U; tick <= 2000U; tick += 10U)
     {
         position_sample(30.0f, 70.0f);
@@ -134,7 +129,7 @@ static void test_position_loop(void)
     inject(0U, 30.0f, -12); inject(1U, -30.0f, 34); Position_Loop_Task.Update();
     assert(yaw_channel.current_speed == -12.0f && pitch_channel.current_speed == 34.0f);
     assert(yaw_channel.target_speed == 0.0f && pitch_channel.target_speed == 0.0f);
-    puts("PASS fixed 30/70 targets, 10ms grouped output, VOFA angles/speeds and UART buffer ownership");
+    puts("PASS fixed 30/70 targets, 10ms grouped output, retained angle/speed snapshots and no text output");
 
     position_start(); tick = 10U; position_sample(0.0f, 100.0f);
     tick = 111U; inject(0U, 0.0f, 0); Position_Loop_Task.Update(); zero();

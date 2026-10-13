@@ -8,6 +8,7 @@
 /* Compile the actual Task implementation, including its private estimator.
  * Hardware stubs below never participate in the angle mathematics. */
 #include "../../Task/imu_test.c"
+#include "../../Task/usart_test.c"
 
 UART_HandleTypeDef huart1;
 BMI270_Diagnostics bmi270_diag;
@@ -15,9 +16,15 @@ TestDWT test_dwt;
 TestCoreDebug test_core_debug;
 static uint32_t mock_ms, mock_sensor_time, read_calls, tx_calls, init_calls;
 static uint8_t mock_read_status, mock_init_status;
+static const uint8_t *tx_data;
+static uint16_t tx_length;
 static const float bias[3] = {0.01f, -0.015f, 0.02f};
 
 uint32_t HAL_GetTick(void) { return mock_ms; }
+uint32_t usart_GetTick(void) { return mock_ms; }
+uint8_t usart_TxReady(void) { return huart1.gState == HAL_UART_STATE_READY; }
+HAL_StatusTypeDef usart_Start(void) { return HAL_OK; }
+uint16_t usart_Rx(uint8_t *data, uint16_t size) { (void)data; (void)size; return 0U; }
 void HAL_Delay(uint32_t ms) { mock_ms += ms; }
 void BMI270_GPIO_init(void) {}
 void BMI270_com_init(void) {}
@@ -55,6 +62,7 @@ HAL_StatusTypeDef usart_Tx(const uint8_t *data, uint16_t length)
     assert(huart1.gState == HAL_UART_STATE_READY);
     assert(data != NULL && length > 0U && length < sizeof(message));
     ++tx_calls;
+    tx_data = data; tx_length = length;
     huart1.gState = HAL_UART_STATE_BUSY_TX;
     return HAL_OK;
 }
@@ -73,6 +81,8 @@ static void reset_test(void)
     imu_dwt_ready = 1U;
     bmi270_diag = (BMI270_Diagnostics){0};
     huart1.gState = HAL_UART_STATE_READY;
+    IMU_TestSetTextOutput(1U);
+    vofa_task_init();
     IMU_AngleRestart();
 }
 
@@ -227,12 +237,66 @@ static void test_task_and_output(void)
     puts("PASS 500 Hz polling/100 Hz samples, NOT_READY, exact format, TX lifetime, stale/error/init failure");
 }
 
+static void test_vofa_integration(void)
+{
+    reset_test();
+    IMU_TestSetTextOutput(0U);
+    IMU_Angle_Test();
+    assert(init_calls == 1U && tx_calls == 0U);
+    assert(isnan(imu_vofa_data.pitch_angle) && isnan(imu_vofa_data.accel_x));
+    mock_ms += 10U; IMU_Angle_Test();
+    assert(isnan(imu_vofa_data.yaw_angle) && imu_vofa_data.accel_x == 0.0f);
+    for (uint32_t i = 1U; i < 220U; ++i)
+    {
+        mock_ms += 10U;
+        IMU_Angle_Test();
+        uint32_t before = tx_calls;
+        vofa_task_update();
+        if (tx_calls != before) { assert(tx_length == 20U); }
+        huart1.gState = HAL_UART_STATE_READY;
+    }
+    assert(imu_angle.ready && fabsf(imu_vofa_data.pitch_angle) < 0.001f);
+    assert(imu_vofa_data.yaw_angle == 0.0f && init_calls == 1U);
+    /* Synthetic data passes through the real estimator, snapshot and packer. */
+    sample(20.0f, 0.0f, 10.0f, 0.0f);
+    mock_read_status = BMI270_NOT_READY;
+    IMU_Angle_Test();
+    imu_vofa_data_t expected = imu_vofa_data;
+    assert(expected.accel_x < -3.0f && expected.accel_y == 0.0f);
+    vofa_last_sample_ms = mock_ms - 100U;
+    vofa_task_update();
+    assert(tx_length == 20U);
+    float values[4]; memcpy(values, tx_data, sizeof(values));
+    assert(values[0] == expected.pitch_angle && values[1] == expected.yaw_angle);
+    assert(values[2] == expected.accel_x && values[3] == expected.accel_y);
+    const uint8_t tail[4] = {0, 0, 0x80, 0x7F};
+    assert(memcmp(tx_data + 16U, tail, sizeof(tail)) == 0);
+    uint8_t saved[20]; memcpy(saved, tx_data, sizeof(saved));
+    mock_ms += 101U; IMU_Angle_Test(); vofa_task_update();
+    assert(isnan(imu_vofa_data.pitch_angle) && isnan(imu_vofa_data.accel_x));
+    assert(memcmp(saved, tx_data, sizeof(saved)) == 0);
+    huart1.gState = HAL_UART_STATE_READY;
+    mock_ms += 100U; vofa_task_update();
+    memcpy(values, tx_data, sizeof(values));
+    for (uint32_t i = 0; i < 4U; ++i) { assert(isnan(values[i])); }
+    huart1.gState = HAL_UART_STATE_READY;
+    mock_read_status = BMI270_SPI_ERROR; mock_ms += 10U; IMU_Angle_Test();
+    assert(isnan(imu_vofa_data.yaw_angle) && isnan(imu_vofa_data.accel_y));
+    reset_test(); IMU_TestSetTextOutput(0U); mock_init_status = BMI270_CONFIG_ERROR;
+    IMU_Angle_Test(); mock_ms += 1000U; IMU_Angle_Test();
+    assert(init_calls == 1U && read_calls == 0U && tx_calls == 0U);
+    assert(isnan(imu_vofa_data.pitch_angle));
+    puts("PASS IMU VOFA: 10ms task, calibration, snapshot units/order, no init/text mixing,");
+    puts("               async lifetime, stale/error NaNs and silent init failure.");
+}
+
 int main(void)
 {
     test_noise_and_pitch();
     test_yaw_and_wrap();
     test_rejection_and_gaps();
     test_task_and_output();
+    test_vofa_integration();
     puts("All IMU angle host tests passed (synthetic input; not hardware acceptance).");
     return 0;
 }

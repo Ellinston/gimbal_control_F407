@@ -3,6 +3,11 @@
 
 #include "stm32f4xx_hal.h"
 
+/* USART1 配置由 Core/Src/main.c 的 MX_USART1_UART_Init 统一设置：
+ * 115200、UART_WORDLENGTH_8B、UART_STOPBITS_1、UART_PARITY_NONE、
+ * UART_MODE_TX_RX、UART_HWCONTROL_NONE。沿用 HAL 的 UART_InitTypeDef，
+ * 此处不另定义配置结构体，避免出现未应用到硬件的第二份配置。 */
+
 #ifdef __cplusplus
 extern "C" {
 #endif

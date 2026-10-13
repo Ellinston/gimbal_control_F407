@@ -4,6 +4,7 @@
 #include "BMI270reg.h"
 #include "BMI270Middleware.h"
 #include "usart.h"
+#include "usart_test.h"
 #include <math.h>
 #include <stdio.h>
 
@@ -22,6 +23,12 @@ static volatile uint8_t imu_dwt_ready;
 static volatile HAL_StatusTypeDef imu_uart_status = HAL_OK;
 static uint32_t last_test_ms;
 static char message[1024];
+static uint8_t imu_text_output = 1U;
+
+void IMU_TestSetTextOutput(uint8_t enabled)
+{
+    imu_text_output = (enabled != 0U);
+}
 
 typedef struct
 {
@@ -108,6 +115,7 @@ void IMU_TestInit(void)
 
 void Task_IMU_Read_ID(void)
 {
+    if (!imu_text_output) { return; }
     uint8_t accel_id = 0U;
     uint8_t gyro_id = 0U;
     int length;
@@ -154,12 +162,12 @@ void Task_IMU_Init_Test(void)
     size_t used;
     int length;
 
-    if (huart1.gState != HAL_UART_STATE_READY) { return; }
+    if (imu_text_output && !usart_TxReady()) { return; }
     if (!imu_dwt_ready)
     {
         static const uint8_t skipped[] = "IMU INIT CHECK SKIP: DWT not running\r\n";
         imu_init_passed = 0U;
-        imu_uart_status = usart_Tx(skipped, sizeof(skipped) - 1U);
+        if (imu_text_output) { imu_uart_status = usart_Tx(skipped, sizeof(skipped) - 1U); }
         return;
     }
 
@@ -208,7 +216,7 @@ void Task_IMU_Init_Test(void)
                       "IMU INIT CHECK %s\r\n\r\n", imu_init_passed ? "PASS" : "FAIL");
     if ((length <= 0) || ((size_t)length >= sizeof(message) - used)) { return; }
     used += (size_t)length;
-    imu_uart_status = usart_Tx((const uint8_t *)message, (uint16_t)used);
+    if (imu_text_output) { imu_uart_status = usart_Tx((const uint8_t *)message, (uint16_t)used); }
 }
 
 static void IMU_FormatMilli(char *text, size_t capacity, float value)
@@ -288,6 +296,7 @@ void Task_IMU_Data_Test(void)
     }
 
     now = HAL_GetTick();
+    if (!imu_text_output) { return; }
     if (((uint32_t)(now - last_print_ms) < IMU_PRINT_PERIOD_MS) ||
         (huart1.gState != HAL_UART_STATE_READY)) { return; }
     last_print_ms = now;
@@ -384,6 +393,22 @@ static IMU_PitchKalman pitch_filter;
 static float calibration_mean[3], calibration_m2[3];
 static uint32_t angle_last_sensor_time, angle_last_read_ms, angle_last_print_ms;
 static uint8_t angle_started, angle_have_time;
+static float angle_accel_ms2[2];
+
+static void IMU_UpdateVofaData(uint32_t now)
+{
+    imu_vofa_data = (imu_vofa_data_t){NAN, NAN, NAN, NAN};
+    if (!imu_init_passed || !angle_have_time || imu_angle.samples == 0U ||
+        (imu_angle.read_status != BMI270_NO_ERROR && imu_angle.read_status != BMI270_NOT_READY) ||
+        (uint32_t)(now - imu_angle.last_sample_ms) > 100U) { return; }
+    imu_vofa_data.accel_x = angle_accel_ms2[0];
+    imu_vofa_data.accel_y = angle_accel_ms2[1];
+    if (imu_angle.ready)
+    {
+        imu_vofa_data.pitch_angle = imu_angle.pitch_deg;
+        imu_vofa_data.yaw_angle = imu_angle.yaw_deg;
+    }
+}
 
 static float IMU_WrapDegrees(float angle)
 {
@@ -460,6 +485,8 @@ static void IMU_AngleSample(const float accel[3], const float gyro[3],
         gyro_norm2 += gyro[axis] * gyro[axis];
     }
     if (angle_have_time && (ticks == 0U)) { return; } /* 重复样本不积分。 */
+    angle_accel_ms2[0] = accel[0];
+    angle_accel_ms2[1] = accel[1];
     if (angle_have_time && (ticks > IMU_MAX_SAMPLE_TICKS))
     {
         ++imu_angle.gap_resets;
@@ -565,7 +592,7 @@ void IMU_Angle_Test(void)
 {
     if (!angle_started)
     {
-        if (huart1.gState != HAL_UART_STATE_READY) { return; }
+        if (imu_text_output && !usart_TxReady()) { return; }
         Task_IMU_Init_Test();
         angle_started = 1U;
         angle_last_read_ms = HAL_GetTick();
@@ -586,6 +613,8 @@ void IMU_Angle_Test(void)
         else { ++imu_angle.errors; }
     }
     now = HAL_GetTick();
+    IMU_UpdateVofaData(now);
+    if (!imu_text_output) { return; }
     if (((uint32_t)(now - angle_last_print_ms) < IMU_PRINT_PERIOD_MS) ||
         (huart1.gState != HAL_UART_STATE_READY)) { return; }
     angle_last_print_ms = now;

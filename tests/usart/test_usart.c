@@ -81,16 +81,24 @@ static void test_vofa(void)
     };
     tick = 0U; transmit_calls = 0U;
     vofa_task_init();
-    assert(isnan(yaw_channel.current_angle) && isnan(pitch_channel.current_speed));
-    yaw_channel = (motor_channel_t){30.0f, -1.25f, 123.0f, -123.0f};
-    pitch_channel = (motor_channel_t){70.0f, 100.0f, 456.0f, -456.0f};
+    assert(isnan(imu_vofa_data.pitch_angle) && isnan(imu_vofa_data.accel_y));
+    imu_vofa_data = (imu_vofa_data_t){30.0f, -1.25f, 70.0f, 100.0f};
     for (tick = 0U; tick < 100U; tick += 10U) { vofa_task_update(); }
     assert(transmit_calls == 0U);
     vofa_task_update();
     assert(transmit_calls == 1U && transmit_length == sizeof(expected));
     assert(memcmp(transmit_target, expected, sizeof(expected)) == 0);
+    assert(vofa_debug_sample.pitch_angle == 30.0f && vofa_debug_sample.yaw_angle == -1.25f);
+    assert(vofa_debug_sample.accel_x == 70.0f && vofa_debug_sample.accel_y == 100.0f);
+    /* 仅在主机测试控制台打印，不会进入固件 USART1 数据流。 */
+    printf("JustFloat test sample: Pitch=%.2f Yaw=%.2f AccelX=%.2f AccelY=%.2f\n",
+           (double)vofa_debug_sample.pitch_angle, (double)vofa_debug_sample.yaw_angle,
+           (double)vofa_debug_sample.accel_x, (double)vofa_debug_sample.accel_y);
+    printf("JustFloat bytes (%u):", (unsigned)transmit_length);
+    for (uint16_t i = 0U; i < transmit_length; ++i) { printf(" %02X", (unsigned)transmit_target[i]); }
+    puts("");
     /* 同一时刻重复调用，以及连续两周期发送未结束，不能覆盖活动帧。 */
-    yaw_channel.current_angle = 42.0f;
+    imu_vofa_data.yaw_angle = 42.0f;
     vofa_task_update();
     tick = 200U; vofa_task_update();
     tick = 300U; vofa_task_update();

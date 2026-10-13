@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "motor_task.h"
+#include "imu_test.h"
 #include "usart_test.h"
 /* USER CODE END Includes */
 
@@ -99,8 +99,9 @@ int main(void)
   MX_USART1_UART_Init();
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
+  IMU_TestInit();
   vofa_task_init();
-  Task_Position_Loop_Test_Init();
+  IMU_TestSetTextOutput(0U); /* USART1 仅发送 JustFloat，包含启动阶段。 */
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -110,7 +111,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    Task_Position_Loop_Test();
+    IMU_Angle_Test();
     vofa_task_update();
     HAL_Delay(10);
   }
