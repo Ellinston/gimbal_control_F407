@@ -74,6 +74,17 @@ HAL_StatusTypeDef usart_Tx(const uint8_t *data, uint16_t length)
     return status;
 }
 
+uint8_t usart_TxReady(void)
+{
+    return (uint8_t)((huart1.Instance == USART1) &&
+                     (huart1.gState == HAL_UART_STATE_READY));
+}
+
+uint32_t usart_GetTick(void)
+{
+    return HAL_GetTick();
+}
+
 uint16_t usart_Rx(uint8_t *buffer, uint16_t capacity)
 {
     uint16_t count = 0U;

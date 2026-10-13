@@ -21,7 +21,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "motor_single_test.h"
+#include "motor_task.h"
+#include "usart_test.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -98,7 +99,8 @@ int main(void)
   MX_USART1_UART_Init();
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
-  (void)Task_Motor_Single_Test_Init();
+  vofa_task_init();
+  Task_Position_Loop_Test_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -108,7 +110,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    Task_Motor_Single_Test();
+    Task_Position_Loop_Test();
+    vofa_task_update();
+    HAL_Delay(10);
   }
   /* USER CODE END 3 */
 }

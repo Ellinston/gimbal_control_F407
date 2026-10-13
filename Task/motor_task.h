@@ -127,7 +127,8 @@ void Task_Double_Motor_Test(void);
 void Task_Double_Motor_Test_Stop(void);
 
 /* 固定目标位置环：角度取本文件顶部调参区；与往返任务互斥。
- * 复用 double_motor_status、10ms控制、100ms异步日志和锁止保护。
+ * 复用 double_motor_status、10ms控制和锁止保护；控制后更新 VOFA 通道。
+ * 本任务不发送文本；另调 vofa_task_update，每100ms输出 JustFloat。
  * 必须先 Init，再于主循环持续调用 Test；Stop 后须重新 Init。 */
 extern const Task_Interface_t Position_Loop_Task;
 void Task_Position_Loop_Test_Init(void);

@@ -24,6 +24,11 @@ HAL_StatusTypeDef usart_Start(void);
  */
 HAL_StatusTypeDef usart_Tx(const uint8_t *data, uint16_t length);
 
+/* 主循环发送者在改写异步发送缓冲区前查询；发送均须由主循环提交。 */
+uint8_t usart_TxReady(void);
+/* 串口任务使用的毫秒时基，按 uint32_t 差值处理回绕。 */
+uint32_t usart_GetTick(void);
+
 /**
  * @brief 取出已接收的数据，立即返回，不等待新数据。
  * @param buffer 接收数据的目标缓冲区。

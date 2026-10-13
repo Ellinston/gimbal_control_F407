@@ -1,5 +1,58 @@
 #include "usart_test.h"
 #include "usart.h"
+#include <math.h>
+#include <string.h>
+
+#define VOFA_PERIOD_MS 100U
+
+motor_channel_t yaw_channel;
+motor_channel_t pitch_channel;
+static uint32_t vofa_last_sample_ms;
+static uint8_t vofa_initialized;
+/* 必须持久保存到中断发送完成；更新前先经 BSP 确认发送空闲。 */
+static uint8_t vofa_packet[20];
+static volatile HAL_StatusTypeDef vofa_tx_status = HAL_BUSY;
+static volatile uint32_t vofa_tx_submitted, vofa_tx_dropped;
+
+_Static_assert(sizeof(float) == 4U, "JustFloat requires 32-bit floats");
+
+void vofa_task_init(void)
+{
+    yaw_channel = (motor_channel_t){0.0f, NAN, 0.0f, NAN};
+    pitch_channel = yaw_channel;
+    vofa_last_sample_ms = usart_GetTick();
+    vofa_tx_status = HAL_BUSY;
+    vofa_tx_submitted = vofa_tx_dropped = 0U;
+    vofa_initialized = 1U;
+    /* 不改写 vofa_packet，重复初始化也不能破坏正在发送的帧。 */
+}
+
+void vofa_task_update(void)
+{
+    uint32_t now = usart_GetTick();
+    if (!vofa_initialized || (uint32_t)(now - vofa_last_sample_ms) < VOFA_PERIOD_MS)
+    {
+        return;
+    }
+    vofa_last_sample_ms = now;
+    if (!usart_TxReady())
+    {
+        vofa_tx_status = HAL_BUSY;
+        ++vofa_tx_dropped;
+        return;
+    }
+    const float channels[4] = {yaw_channel.target_angle, yaw_channel.current_angle,
+                               pitch_channel.target_angle, pitch_channel.current_angle};
+    /* STM32F407 为小端 IEEE754 float；不发送结构体填充或速度字段。 */
+    memcpy(vofa_packet, channels, sizeof(channels));
+    vofa_packet[16] = 0x00U;
+    vofa_packet[17] = 0x00U;
+    vofa_packet[18] = 0x80U;
+    vofa_packet[19] = 0x7FU;
+    vofa_tx_status = usart_Tx(vofa_packet, sizeof(vofa_packet));
+    if (vofa_tx_status == HAL_OK) { ++vofa_tx_submitted; }
+    else { ++vofa_tx_dropped; }
+}
 
 /* 调试器中分别观察接收启动状态、发送提交状态和错误次数。 */
 static volatile HAL_StatusTypeDef usart_start_status = HAL_ERROR;

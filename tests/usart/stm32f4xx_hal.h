@@ -20,4 +20,5 @@ static inline void __set_PRIMASK(uint32_t value) { mock_primask = value; }
 HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *, uint8_t *, uint16_t);
 HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *, const uint8_t *, uint16_t);
 HAL_StatusTypeDef HAL_UART_AbortReceive(UART_HandleTypeDef *);
+uint32_t HAL_GetTick(void);
 #endif

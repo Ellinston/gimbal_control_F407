@@ -1,6 +1,7 @@
 #include "motor_task.h"
 #include "can.h"
 #include "usart.h"
+#include "usart_test.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -247,8 +248,7 @@ static void Double_Log(uint32_t now)
 {
     if ((uint32_t)(now - double_last_log_ms) < 100U) { return; }
     double_last_log_ms = now;
-    extern UART_HandleTypeDef huart1;
-    if (huart1.gState != HAL_UART_STATE_READY)
+    if (!usart_TxReady())
     {
         double_motor_status.log_status = HAL_BUSY;
         ++double_motor_status.log_dropped;
@@ -259,29 +259,12 @@ static void Double_Log(uint32_t now)
     Double_FormatAngle(pitch, sizeof(pitch), Motor_Get_Angle(PITCH_MOTOR));
     const Motor_ControlStatus *y = Motor_Get_Status(YAW_MOTOR);
     const Motor_ControlStatus *p = Motor_Get_Status(PITCH_MOTOR);
-    int length;
-    if (fixed_position_test)
-    {
-        char yaw_target[24], pitch_target[24], yaw_error[24], pitch_error[24];
-        Double_FormatAngle(yaw_target, sizeof(yaw_target), double_motor_status.yaw_target_deg);
-        Double_FormatAngle(pitch_target, sizeof(pitch_target), double_motor_status.pitch_target_deg);
-        Double_FormatAngle(yaw_error, sizeof(yaw_error), double_motor_status.yaw_target_deg - Motor_Get_Angle(YAW_MOTOR));
-        Double_FormatAngle(pitch_error, sizeof(pitch_error), double_motor_status.pitch_target_deg - Motor_Get_Angle(PITCH_MOTOR));
-        length = snprintf(double_log_buffer, sizeof(double_log_buffer),
-            "[PID] state=%u YAW: Target=%sdeg, Current=%sdeg, Error=%sdeg\r\n"
-            "[PID] PITCH: Target=%sdeg, Current=%sdeg, Error=%sdeg\r\n",
-            (unsigned int)double_motor_status.state, yaw_target, yaw, yaw_error,
-            pitch_target, pitch, pitch_error);
-    }
-    else
-    {
-        length = snprintf(double_log_buffer, sizeof(double_log_buffer),
+    int length = snprintf(double_log_buffer, sizeof(double_log_buffer),
             "[MOTOR] state=%u YAW target=%ld actual=%sdeg PITCH target=%ld actual=%sdeg rpm=%d,%d cmd=%d,%d\r\n",
             (unsigned int)double_motor_status.state,
             (long)double_motor_status.yaw_target_deg, yaw,
             (long)double_motor_status.pitch_target_deg, pitch,
             y->feedback.speed_rpm, p->feedback.speed_rpm, y->voltage_command, p->voltage_command);
-    }
     if (length <= 0 || (size_t)length >= sizeof(double_log_buffer))
     {
         double_motor_status.log_status = HAL_ERROR;
@@ -366,7 +349,8 @@ void Task_Double_Motor_Test(void)
     {
         Double_SendZero(now);
     }
-    Double_Log(now);
+    /* 固定位置模式由 VOFA 任务独占串口，避免文本污染 JustFloat。 */
+    if (!fixed_position_test) { Double_Log(now); }
 }
 
 const Task_Interface_t Double_Motor_Task =
@@ -374,6 +358,22 @@ const Task_Interface_t Double_Motor_Task =
     .Init = Task_Double_Motor_Test_Init,
     .Update = Task_Double_Motor_Test
 };
+
+static void Position_UpdateChannels(void)
+{
+    const Motor_ControlStatus *yaw = Motor_Get_Status(YAW_MOTOR);
+    const Motor_ControlStatus *pitch = Motor_Get_Status(PITCH_MOTOR);
+    uint32_t now = usart_GetTick();
+    yaw_channel.target_angle = double_motor_status.yaw_target_deg;
+    pitch_channel.target_angle = double_motor_status.pitch_target_deg;
+    yaw_channel.target_speed = yaw->target_speed_rpm;
+    pitch_channel.target_speed = pitch->target_speed_rpm;
+    /* 失联不伪装为稳定角度；目标仍保留任务设定，便于对照。 */
+    yaw_channel.current_angle = motor_IsOnline(&yaw->feedback, now) ? Motor_Get_Angle(YAW_MOTOR) : NAN;
+    pitch_channel.current_angle = motor_IsOnline(&pitch->feedback, now) ? Motor_Get_Angle(PITCH_MOTOR) : NAN;
+    yaw_channel.current_speed = motor_IsOnline(&yaw->feedback, now) ? (float)yaw->feedback.speed_rpm : NAN;
+    pitch_channel.current_speed = motor_IsOnline(&pitch->feedback, now) ? (float)pitch->feedback.speed_rpm : NAN;
+}
 
 void Task_Position_Loop_Test_Init(void)
 {
@@ -383,16 +383,19 @@ void Task_Position_Loop_Test_Init(void)
     Motor_Set_Angle(PITCH_MOTOR, target_angles.pitch);
     double_motor_status.yaw_target_deg = Motor_Get_Status(YAW_MOTOR)->target_angle_deg;
     double_motor_status.pitch_target_deg = Motor_Get_Status(PITCH_MOTOR)->target_angle_deg;
+    Position_UpdateChannels();
 }
 
 void Task_Position_Loop_Test(void)
 {
     Task_Double_Motor_Test();
+    Position_UpdateChannels();
 }
 
 void Task_Position_Loop_Test_Stop(void)
 {
     Task_Double_Motor_Test_Stop();
+    Position_UpdateChannels();
 }
 
 const Task_Interface_t Position_Loop_Task =

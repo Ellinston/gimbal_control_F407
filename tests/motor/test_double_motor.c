@@ -1,6 +1,7 @@
 #include "motor_task.h"
 #include "can.h"
 #include "usart.h"
+#include "usart_test.h"
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -62,6 +63,8 @@ static void reset(uint32_t now)
     init_result = tx_result = abort_result = HAL_OK;
     memset(pending, 0, sizeof(pending)); memset(sent, 0xFF, sizeof(sent));
     huart1.gState = HAL_UART_STATE_READY;
+    inflight = NULL; inflight_length = 0U;
+    vofa_task_init();
     Double_Motor_Task.Init();
     assert(double_motor_status.state == DOUBLE_MOTOR_WAIT_FEEDBACK); zero();
 }
@@ -80,6 +83,7 @@ static void position_sample(float yaw, float pitch)
 {
     inject(0U, yaw, 0); inject(1U, pitch - 100.0f, 0);
     Position_Loop_Task.Update();
+    vofa_task_update();
 }
 
 static void position_start(void)
@@ -94,7 +98,8 @@ static void test_position_loop(void)
 {
     reset(0U); Position_Loop_Task.Init();
     Position_Loop_Task.Update(); zero();
-    assert(strstr((const char *)inflight, "Current=NAdeg") != NULL);
+    assert(inflight == NULL);
+    assert(isnan(yaw_channel.current_angle) && isnan(pitch_channel.current_angle));
     tick = 10U; inject(0U, 0.0f, 0); Position_Loop_Task.Update(); zero();
     assert(double_motor_status.state == DOUBLE_MOTOR_WAIT_FEEDBACK);
     tick = 20U; inject(1U, 0.0f, 0); Position_Loop_Task.Update(); zero();
@@ -105,14 +110,16 @@ static void test_position_loop(void)
     assert(sent[0] == 0x04U && sent[1] == 0xB0U && sent[2] == 0xFBU && sent[3] == 0x50U);
     assert(Motor_Get_Status(YAW_MOTOR)->target_angle_deg == 30.0f);
     assert(Motor_Get_Status(PITCH_MOTOR)->target_angle_deg == 70.0f);
-    char snapshot[192]; uint16_t saved_length = inflight_length;
-    memcpy(snapshot, inflight, saved_length);
     tick = 100U; position_sample(0.0f, 100.0f);
-    assert(memcmp(snapshot, inflight, saved_length) == 0 && double_motor_status.log_dropped > 0U);
+    assert(inflight_length == 20U && double_motor_status.log_submitted == 0U);
+    float channels[4]; memcpy(channels, inflight, sizeof(channels));
+    assert(channels[0] == 30.0f && channels[1] == 0.0f && channels[2] == 70.0f && channels[3] == 100.0f);
+    const uint8_t tail[4] = {0U, 0U, 0x80U, 0x7FU};
+    assert(memcmp(inflight + 16U, tail, sizeof(tail)) == 0);
+    uint8_t snapshot[20]; memcpy(snapshot, inflight, sizeof(snapshot));
+    tick = 200U; position_sample(1.0f, 99.0f);
+    assert(memcmp(snapshot, inflight, sizeof(snapshot)) == 0);
     huart1.gState = HAL_UART_STATE_READY;
-    tick = 200U; position_sample(0.0f, 100.0f);
-    assert(strstr((const char *)inflight, "[PID] state=1 YAW: Target=30.0deg, Current=0.0deg, Error=30.0deg") != NULL);
-    assert(strstr((const char *)inflight, "PITCH: Target=70.0deg, Current=100.0deg, Error=-30.0deg") != NULL);
     for (tick = 210U; tick <= 2000U; tick += 10U)
     {
         position_sample(30.0f, 70.0f);
@@ -124,11 +131,15 @@ static void test_position_loop(void)
     assert(Motor_Get_Status(PITCH_MOTOR)->target_angle_deg == MOTOR_PITCH_MAX_DEG);
     Motor_PID_Control(YAW_MOTOR, -999.0f);
     assert(Motor_Get_Status(YAW_MOTOR)->target_angle_deg == MOTOR_YAW_MIN_DEG);
-    puts("PASS fixed 30/70 targets, 10ms grouped output, angle error logs and UART buffer ownership");
+    inject(0U, 30.0f, -12); inject(1U, -30.0f, 34); Position_Loop_Task.Update();
+    assert(yaw_channel.current_speed == -12.0f && pitch_channel.current_speed == 34.0f);
+    assert(yaw_channel.target_speed == 0.0f && pitch_channel.target_speed == 0.0f);
+    puts("PASS fixed 30/70 targets, 10ms grouped output, VOFA angles/speeds and UART buffer ownership");
 
     position_start(); tick = 10U; position_sample(0.0f, 100.0f);
     tick = 111U; inject(0U, 0.0f, 0); Position_Loop_Task.Update(); zero();
     assert(double_motor_status.state == DOUBLE_MOTOR_FEEDBACK_LOST);
+    assert(isnan(pitch_channel.current_angle) && isnan(pitch_channel.current_speed));
     tick = 112U; position_sample(0.0f, 100.0f); zero();
     assert(double_motor_status.state == DOUBLE_MOTOR_FEEDBACK_LOST);
     position_start(); tick = 10U; tx_result = HAL_BUSY; position_sample(0.0f, 100.0f);

@@ -10,6 +10,9 @@ static const uint8_t *transmit_target;
 static uint16_t transmit_length;
 static unsigned receive_calls, transmit_calls;
 static HAL_StatusTypeDef receive_result = HAL_OK;
+static HAL_StatusTypeDef transmit_result = HAL_OK;
+static uint32_t tick;
+uint32_t HAL_GetTick(void) { return tick; }
 
 HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *uart,
                                     uint8_t *data, uint16_t size)
@@ -28,6 +31,7 @@ HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *uart,
                                      const uint8_t *data, uint16_t size)
 {
     if (uart->gState != HAL_UART_STATE_READY) return HAL_BUSY;
+    if (transmit_result != HAL_OK) return transmit_result;
     transmit_target = data;
     transmit_length = size;
     ++transmit_calls;
@@ -64,6 +68,55 @@ static void finish_tx(void)
     assert(transmit_length == 5U);
     assert(memcmp(transmit_target, "PONG\n", 5U) == 0);
     huart1.gState = HAL_UART_STATE_READY;
+}
+
+static void test_vofa(void)
+{
+    const uint8_t expected[20] = {
+        0x00, 0x00, 0xF0, 0x41, /* 30 */
+        0x00, 0x00, 0xA0, 0xBF, /* -1.25 */
+        0x00, 0x00, 0x8C, 0x42, /* 70 */
+        0x00, 0x00, 0xC8, 0x42, /* 100 */
+        0x00, 0x00, 0x80, 0x7F
+    };
+    tick = 0U; transmit_calls = 0U;
+    vofa_task_init();
+    assert(isnan(yaw_channel.current_angle) && isnan(pitch_channel.current_speed));
+    yaw_channel = (motor_channel_t){30.0f, -1.25f, 123.0f, -123.0f};
+    pitch_channel = (motor_channel_t){70.0f, 100.0f, 456.0f, -456.0f};
+    for (tick = 0U; tick < 100U; tick += 10U) { vofa_task_update(); }
+    assert(transmit_calls == 0U);
+    vofa_task_update();
+    assert(transmit_calls == 1U && transmit_length == sizeof(expected));
+    assert(memcmp(transmit_target, expected, sizeof(expected)) == 0);
+    /* 同一时刻重复调用，以及连续两周期发送未结束，不能覆盖活动帧。 */
+    yaw_channel.current_angle = 42.0f;
+    vofa_task_update();
+    tick = 200U; vofa_task_update();
+    tick = 300U; vofa_task_update();
+    assert(transmit_calls == 1U && vofa_tx_dropped == 2U);
+    assert(memcmp(transmit_target, expected, sizeof(expected)) == 0);
+    huart1.gState = HAL_UART_STATE_READY;
+    tick = 310U; vofa_task_update(); assert(transmit_calls == 1U);
+    tick = 400U; vofa_task_update();
+    float actual;
+    memcpy(&actual, transmit_target + 4U, sizeof(actual));
+    assert(transmit_calls == 2U && actual == 42.0f);
+    huart1.gState = HAL_UART_STATE_READY;
+    transmit_result = HAL_ERROR; tick = 500U; vofa_task_update();
+    assert(vofa_tx_status == HAL_ERROR && vofa_tx_dropped == 3U);
+    transmit_result = HAL_OK; tick = 600U; vofa_task_update();
+    assert(transmit_calls == 3U && vofa_tx_submitted == 3U);
+    uint8_t snapshot[20]; memcpy(snapshot, transmit_target, sizeof(snapshot));
+    tick = UINT32_MAX - 49U; vofa_task_init();
+    assert(memcmp(snapshot, transmit_target, sizeof(snapshot)) == 0);
+    huart1.gState = HAL_UART_STATE_READY;
+    tick = 49U; vofa_task_update(); assert(transmit_calls == 3U);
+    tick = 50U; vofa_task_update(); assert(transmit_calls == 4U);
+    memcpy(&actual, transmit_target + 4U, sizeof(actual)); assert(isnan(actual));
+    huart1.gState = HAL_UART_STATE_READY;
+    puts("PASS VOFA: exact 20-byte JustFloat, channel order, 100ms cadence, busy buffer lifetime,");
+    puts("           dropped periods, TX error recovery, reinitialization and tick wrap.");
 }
 
 int main(void)
@@ -162,6 +215,7 @@ int main(void)
     assert(mock_primask == 0U);
     puts("PASS: RX start/retry, bounds, overflow, wrap, 4096 cycles, TX busy/lifetime,");
     puts("      IRQ mask, callback routing, error recovery, split/burst/invalid/long PING lines.");
+    test_vofa();
     return 0;
 }
 

@@ -8,6 +8,7 @@ New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 $testExe = Join-Path $outputDir 'test_motor.exe'
 $dualIncludes = @('-I', (Join-Path $projectRoot 'tests/can'), '-I', (Join-Path $projectRoot 'Bsp/can'), '-I', (Join-Path $projectRoot 'Bsp/usart'), '-I', (Join-Path $projectRoot 'Bsp/Algorithm'), '-I', (Join-Path $projectRoot 'device/motor'), '-I', (Join-Path $projectRoot 'Task'))
 $dualSources = @((Join-Path $projectRoot 'device/motor/motor.c'), (Join-Path $projectRoot 'device/motor/motor_control.c'), (Join-Path $projectRoot 'Bsp/Algorithm/pid.c'), (Join-Path $projectRoot 'Task/motor_task.c'))
+$dualSources += @((Join-Path $projectRoot 'Task/usart_test.c'), (Join-Path $PSScriptRoot 'mock_usart_task.c'))
 $pidTestExe = Join-Path $outputDir 'test_pid.exe'
 & $GccPath -std=c11 -Wall -Wextra -Werror -I (Join-Path $projectRoot 'Bsp/Algorithm') (Join-Path $PSScriptRoot 'test_pid.c') (Join-Path $projectRoot 'Bsp/Algorithm/pid.c') -lm -o $pidTestExe
 if ($LASTEXITCODE -ne 0) { throw "PID host build failed (exit $LASTEXITCODE)" }
