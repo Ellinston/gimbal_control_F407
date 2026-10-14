@@ -49,8 +49,8 @@ UART_HandleTypeDef huart1;
 SPI_HandleTypeDef hspi1;
 
 /* USER CODE BEGIN PV */
-/* 改为 &Sine_Speed_Task 可运行原正弦速度测试；两种测试互斥调度。 */
-static const Task_Interface_t * const motor_test = &Serial_Position_Task;
+/* 自稳：PITCH保持水平，YAW保持启用朝向；可切回Serial_Position_Task或Sine_Speed_Task。 */
+static const Task_Interface_t * const motor_test = &IMU_Stabilize_Task;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/

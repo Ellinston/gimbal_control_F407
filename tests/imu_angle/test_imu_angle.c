@@ -10,6 +10,14 @@
 #include "../../Task/imu_test.c"
 #include "../../Task/usart_test.c"
 
+
+/* 本套件只集成真实IMU/USART；电机端返回无反馈和零输出。 */
+static Motor_ControlStatus mock_motor_status[MOTOR_AXIS_COUNT];
+const Motor_ControlStatus *Motor_Get_Status(Motor_ID motor) { return &mock_motor_status[motor]; }
+uint8_t motor_IsOnline(const Motor *motor, uint32_t now) { (void)motor; (void)now; return 0U; }
+float Get_Current_Angle(Motor_ID motor) { (void)motor; return NAN; }
+float Motor_Get_Output(Motor_ID motor) { (void)motor; return 0.0f; }
+
 UART_HandleTypeDef huart1;
 BMI270_Diagnostics bmi270_diag;
 TestDWT test_dwt;
@@ -252,10 +260,13 @@ static void test_vofa_integration(void)
         IMU_Angle_Test();
         uint32_t before = tx_calls;
         vofa_task_update();
-        if (tx_calls != before) { assert(tx_length == 20U); }
+        if (tx_calls != before) { assert(tx_length == 28U); }
         huart1.gState = HAL_UART_STATE_READY;
     }
     assert(imu_angle.ready && fabsf(imu_vofa_data.pitch_angle) < 0.001f);
+    uint32_t reads_before_get = read_calls;
+    assert(imu_test_get_yaw_angle() == 0.0f);
+    assert(read_calls == reads_before_get);
     assert(imu_vofa_data.yaw_angle == 0.0f && init_calls == 1U);
     /* Synthetic data passes through the real estimator, snapshot and packer. */
     sample(20.0f, 0.0f, 10.0f, 0.0f);
@@ -263,16 +274,22 @@ static void test_vofa_integration(void)
     IMU_Angle_Test();
     imu_vofa_data_t expected = imu_vofa_data;
     assert(expected.accel_x < -3.0f && expected.accel_y == 0.0f);
+    assert(imu_test_get_yaw_angle() == expected.yaw_angle);
+    assert(imu_test_get_pitch_angle() == expected.pitch_angle);
     vofa_last_sample_ms = mock_ms - 100U;
     vofa_task_update();
-    assert(tx_length == 20U);
-    float values[4]; memcpy(values, tx_data, sizeof(values));
-    assert(values[0] == expected.pitch_angle && values[1] == expected.yaw_angle);
-    assert(values[2] == expected.accel_x && values[3] == expected.accel_y);
+    assert(tx_length == 28U);
+    float values[6]; memcpy(values, tx_data, sizeof(values));
+    assert(values[0] == expected.yaw_angle && values[1] == expected.pitch_angle);
+    assert(isnan(values[2]) && isnan(values[3]));
+    assert(values[4] == 0.0f && values[5] == 0.0f);
     const uint8_t tail[4] = {0, 0, 0x80, 0x7F};
-    assert(memcmp(tx_data + 16U, tail, sizeof(tail)) == 0);
-    uint8_t saved[20]; memcpy(saved, tx_data, sizeof(saved));
-    mock_ms += 101U; IMU_Angle_Test(); vofa_task_update();
+    assert(memcmp(tx_data + 24U, tail, sizeof(tail)) == 0);
+    uint8_t saved[28]; memcpy(saved, tx_data, sizeof(saved));
+    mock_ms += 101U;
+    /* 即使采样任务未再调度，getter也必须自行拒绝过期角度。 */
+    assert(isnan(imu_test_get_yaw_angle()) && isnan(imu_test_get_pitch_angle()));
+    IMU_Angle_Test(); vofa_task_update();
     assert(isnan(imu_vofa_data.pitch_angle) && isnan(imu_vofa_data.accel_x));
     assert(memcmp(saved, tx_data, sizeof(saved)) == 0);
     huart1.gState = HAL_UART_STATE_READY;
@@ -286,6 +303,7 @@ static void test_vofa_integration(void)
     IMU_Angle_Test(); mock_ms += 1000U; IMU_Angle_Test();
     assert(init_calls == 1U && read_calls == 0U && tx_calls == 0U);
     assert(isnan(imu_vofa_data.pitch_angle));
+    assert(isnan(imu_test_get_yaw_angle()) && isnan(imu_test_get_pitch_angle()));
     puts("PASS IMU VOFA: 10ms task, calibration, snapshot units/order, no init/text mixing,");
     puts("               async lifetime, stale/error NaNs and silent init failure.");
 }

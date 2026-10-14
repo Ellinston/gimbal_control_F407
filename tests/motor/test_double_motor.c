@@ -32,7 +32,7 @@ HAL_StatusTypeDef can_Tx(uint32_t id, const uint8_t *data, uint8_t size)
 HAL_StatusTypeDef can_Rx(uint32_t id, uint8_t *data, uint8_t *size)
 {
     assert(id == 0x205U || id == 0x206U);
-    uint32_t i = id - 0x205U;
+    uint32_t i = id == 0x204U + MOTOR_YAW_CAN_ID ? YAW_MOTOR : PITCH_MOTOR;
     if (!pending[i]) { return HAL_BUSY; }
     pending[i] = 0U; *size = length[i]; memcpy(data, feedback[i], 8U);
     return HAL_OK;
@@ -44,6 +44,13 @@ HAL_StatusTypeDef usart_Tx(const uint8_t *data, uint16_t size)
     huart1.gState = HAL_UART_STATE_BUSY_TX;
     return HAL_OK;
 }
+static int16_t submitted_command(Motor_ID axis)
+{
+    uint32_t slot = axis == YAW_MOTOR ? MOTOR_YAW_CAN_ID - 1U : MOTOR_PITCH_CAN_ID - 1U;
+    uint16_t raw = (uint16_t)(((uint16_t)sent[2U * slot] << 8) | sent[2U * slot + 1U]);
+    return (int16_t)(raw <= 32767U ? (int32_t)raw : (int32_t)raw - 65536);
+}
+
 static void inject(uint32_t axis, float degrees, int16_t rpm)
 {
     while (degrees < 0.0f) { degrees += 360.0f; }
@@ -130,7 +137,7 @@ static void test_position_loop(void)
     uint32_t before = attempts;
     tick = 30U; position_sample(0.0f, 100.0f);
     assert(attempts == before + 1U);
-    assert(sent[0] == 0x03U && sent[1] == 0xECU && sent[2] == 0xFCU && sent[3] == 0x14U);
+    assert(submitted_command(YAW_MOTOR) == 1004 && submitted_command(PITCH_MOTOR) == -1004);
     assert(Motor_Get_Status(YAW_MOTOR)->target_angle_deg == 30.0f);
     assert(Motor_Get_Status(PITCH_MOTOR)->target_angle_deg == 70.0f);
     tick = 100U; position_sample(0.0f, 100.0f);
@@ -235,9 +242,10 @@ static void test_task_pid_mapping(void)
 
 static void test_independent_pid_config(void)
 {
+    /* 固定外环输出10rpm，保证速度积分断言独立于生产速度上限。 */
     PID_Config_t angle[MOTOR_AXIS_COUNT] = {
-        [YAW_MOTOR] = {.kp = 20.0f, .max_output = 1500.0f, .integral_limit = 1500.0f},
-        [PITCH_MOTOR] = {.kp = 60.0f, .max_output = 1500.0f, .integral_limit = 1500.0f}
+        [YAW_MOTOR] = {.kp = 20.0f, .max_output = 10.0f, .integral_limit = 1500.0f},
+        [PITCH_MOTOR] = {.kp = 60.0f, .max_output = 10.0f, .integral_limit = 1500.0f}
     };
     PID_Config_t speed[MOTOR_AXIS_COUNT] = {
         [YAW_MOTOR] = {.kp = 10.0f, .ki = 20.0f, .max_output = 1500.0f, .integral_limit = 1500.0f},
@@ -248,8 +256,8 @@ static void test_independent_pid_config(void)
     inject(0U, 0.0f, 0); inject(1U, 0.0f, 0); Motor_Control_ReadFeedback();
     Motor_Set_Angle(YAW_MOTOR, 10.0f); Motor_Set_Angle(PITCH_MOTOR, 110.0f);
     assert(Motor_Control_Update(0.01f) == HAL_OK);
-    assert(Motor_Get_Status(YAW_MOTOR)->target_speed_rpm == MOTOR_CONTROL_SPEED_LIMIT_RPM);
-    assert(Motor_Get_Status(PITCH_MOTOR)->target_speed_rpm == MOTOR_CONTROL_SPEED_LIMIT_RPM);
+    assert(Motor_Get_Status(YAW_MOTOR)->target_speed_rpm == 10.0f);
+    assert(Motor_Get_Status(PITCH_MOTOR)->target_speed_rpm == 10.0f);
     assert(Motor_Get_Status(YAW_MOTOR)->voltage_command == 102);
     assert(Motor_Get_Status(PITCH_MOTOR)->voltage_command == 300);
     /* 初始化复制参数；改变调用方配置和 YAW 目标不影响 PITCH。 */
@@ -308,10 +316,11 @@ static void test_velocity_feedforward(void)
     Motor_Set_Velocity_Feedforward_Gain(YAW_MOTOR, NAN); /* 无效增益不覆盖已有值。 */
     assert(Motor_Control_Update(0.01f) == HAL_OK);
     assert(Motor_Get_Status(YAW_MOTOR)->voltage_command == 420);
-    Motor_Set_Velocity_Feedforward_Gain(YAW_MOTOR, 1000.0f);
+    Motor_Set_Velocity_Feedforward_Gain(YAW_MOTOR, (float)MOTOR_VOLTAGE_SAFE_LIMIT);
     assert(Motor_Control_Update(0.01f) == HAL_OK);
     assert(Motor_Get_Status(YAW_MOTOR)->speed_pid_output == 400.0f);
     assert(Motor_Get_Status(YAW_MOTOR)->voltage_command == MOTOR_VOLTAGE_SAFE_LIMIT);
+    assert(Motor_Get_Output(YAW_MOTOR) == (float)MOTOR_VOLTAGE_SAFE_LIMIT);
     Motor_Set_Velocity_Feedforward_Gain(YAW_MOTOR, 0.0f);
     assert(Motor_Control_Update(0.01f) == HAL_OK);
     assert(Motor_Get_Status(YAW_MOTOR)->voltage_command == 400);
@@ -443,7 +452,8 @@ static void test_sine_speed(void)
         assert(fabsf(Motor_Get_Status(YAW_MOTOR)->velocity_ff_output -
                      yaw_channel.target_speed * YAW_VELOCITY_FF_GAIN) < 0.002f);
         assert(Motor_Get_Status(PITCH_MOTOR)->mode == MOTOR_CONTROL_DISABLED);
-        for (uint32_t i = 2U; i < 8U; ++i) { assert(sent[i] == 0U); }
+        assert(submitted_command(PITCH_MOTOR) == 0);
+        for (uint32_t i = 4U; i < 8U; ++i) { assert(sent[i] == 0U); }
     }
     /* 分数rpm进入PI，非有限值停机；大幅值仍由Device限幅。 */
     Motor_Set_Speed(YAW_MOTOR, 0.25f);
@@ -517,6 +527,7 @@ static void test_sine_speed(void)
 
 extern void mock_usart_feed(const uint8_t *data, uint16_t length);
 extern uint32_t mock_usart_fault_count;
+extern float mock_imu_yaw, mock_imu_pitch;
 
 static void serial_bytes(const uint8_t *data, uint16_t size)
 {
@@ -550,6 +561,13 @@ static void serial_start(uint32_t now)
 static void test_serial_position(void)
 {
     serial_start(0U);
+    mock_imu_yaw = -11.0f; mock_imu_pitch = 12.0f;
+    assert(Get_Current_IMU_Angle(YAW_MOTOR) == -11.0f);
+    assert(Get_Current_IMU_Angle(PITCH_MOTOR) == 12.0f);
+    assert(Get_Current_IMU_Angle((Motor_ID)-1) == 0.0f);
+    assert(Get_Current_IMU_Angle(MOTOR_AXIS_COUNT) == 0.0f);
+    assert(Motor_Get_Output((Motor_ID)-1) == 0.0f);
+    assert(Motor_Get_Output(MOTOR_AXIS_COUNT) == 0.0f);
     assert(Get_Current_Angle(YAW_MOTOR) == Motor_Get_Angle(YAW_MOTOR));
     assert(Get_Current_Angle(PITCH_MOTOR) == 100.0f);
     assert(isnan(Get_Current_Angle((Motor_ID)-1)));
@@ -586,22 +604,31 @@ static void test_serial_position(void)
     serial_sample(10U);
     huart1.gState = HAL_UART_STATE_READY;
     tick = 100U; serial_sample(0U); vofa_task_update();
-    assert(inflight_length == 20U);
-    float packet[4]; memcpy(packet, inflight, sizeof(packet));
-    assert(packet[0] == 25.0f && packet[1] == 0.0f && packet[2] == 115.0f && packet[3] == 100.0f);
-    assert(inflight[16] == 0U && inflight[17] == 0U && inflight[18] == 0x80U && inflight[19] == 0x7FU);
-    uint8_t snapshot[20]; memcpy(snapshot, inflight, sizeof(snapshot));
+    assert(inflight_length == 28U);
+    float packet[6]; memcpy(packet, inflight, sizeof(packet));
+    assert(packet[0] == -11.0f && packet[1] == 12.0f);
+    assert(packet[2] == 0.0f && packet[3] == 100.0f);
+    assert(packet[4] == Motor_Get_Output(YAW_MOTOR));
+    assert(packet[5] == Motor_Get_Output(PITCH_MOTOR));
+    assert(packet[4] > 0.0f && packet[5] > 0.0f);
+    assert(inflight[24] == 0U && inflight[25] == 0U && inflight[26] == 0x80U && inflight[27] == 0x7FU);
+    uint8_t snapshot[28]; memcpy(snapshot, inflight, sizeof(snapshot));
     serial_line("SET 70 130\n"); serial_sample(100U); vofa_task_update();
     assert(memcmp(snapshot, inflight, sizeof(snapshot)) == 0);
     serial_line("STOP\nSET 80 140\n"); zero();
+    assert(Motor_Get_Output(YAW_MOTOR) == 0.0f && Motor_Get_Output(PITCH_MOTOR) == 0.0f);
     assert(double_motor_status.state == DOUBLE_MOTOR_STOPPED);
     serial_sample(10U); zero();
-    puts("PASS serial: startup zero, split/glued/CRLF commands, atomic targets, finite input, bounds, STOP latch and four-angle JustFloat");
+    puts("PASS serial: startup zero, split/glued/CRLF commands, atomic targets, finite input, bounds, STOP latch and six-channel IMU/encoder/output JustFloat");
 
     serial_start(0U); serial_line("SET 30 120\n"); serial_sample(10U);
     tick += 101U; Task_Serial_Position_Test(); zero();
     assert(double_motor_status.state == DOUBLE_MOTOR_FEEDBACK_LOST);
     assert(isnan(yaw_channel.current_angle) && isnan(pitch_channel.current_angle));
+    huart1.gState = HAL_UART_STATE_READY; tick += 100U; vofa_task_update();
+    memcpy(packet, inflight, sizeof(packet));
+    assert(isnan(packet[2]) && isnan(packet[3]));
+    assert(packet[4] == 0.0f && packet[5] == 0.0f);
     serial_line("SET 40 110\n"); serial_sample(1U); zero();
     assert(double_motor_status.state == DOUBLE_MOTOR_FEEDBACK_LOST);
     serial_start(0U); serial_line("SET 30 120\n"); serial_sample(10U);
@@ -629,6 +656,119 @@ static void test_serial_position(void)
     Task_Serial_Position_Test(); zero();
     assert(double_motor_status.state == DOUBLE_MOTOR_ANGLE_LIMIT);
     puts("PASS serial: feedback loss, RX corruption, malformed CAN, angle guard, TX failure, late cycle, stop output and tick wrap");
+}
+
+
+static void stabilize_sample(float yaw_joint, float pitch_joint, int16_t yaw_rpm, int16_t pitch_rpm)
+{
+    tick += MOTOR_TASK_TX_PERIOD_MS;
+    inject(YAW_MOTOR, yaw_joint, yaw_rpm);
+    inject(PITCH_MOTOR, pitch_joint, pitch_rpm);
+    huart1.gState = HAL_UART_STATE_READY;
+    IMU_Stabilize_Task.Update();
+}
+
+static void stabilize_start(uint32_t now, float yaw, float pitch)
+{
+    reset(now);
+    mock_imu_yaw = yaw; mock_imu_pitch = pitch;
+    mock_usart_fault_count = 0U;
+    IMU_Stabilize_Task.Init();
+    stabilize_sample(0.0f, 0.0f, 0, 0);
+}
+
+static void test_imu_stabilize(void)
+{
+    const float level = 1.483491f;
+    stabilize_start(0U, NAN, NAN);
+    for (uint32_t i = 0U; i < 220U; ++i)
+    {
+        stabilize_sample(0.0f, 0.0f, 0, 0);
+        assert(double_motor_status.state == DOUBLE_MOTOR_WAIT_FEEDBACK);
+        zero();
+    }
+    mock_imu_yaw = 179.0f; mock_imu_pitch = 20.0f;
+    stabilize_sample(0.0f, 0.0f, 0, 0);
+    assert(double_motor_status.state == DOUBLE_MOTOR_RUNNING);
+    assert(double_motor_status.yaw_target_deg == 179.0f);
+    assert(double_motor_status.pitch_target_deg == level);
+    stabilize_sample(0.0f, 0.0f, 0, 0);
+    assert(Motor_Get_Status(YAW_MOTOR)->mode == MOTOR_CONTROL_IMU_ANGLE);
+    assert(Motor_Get_Status(PITCH_MOTOR)->mode == MOTOR_CONTROL_IMU_ANGLE);
+    assert(Motor_Get_Status(PITCH_MOTOR)->target_angle_deg == level);
+    assert(Motor_Get_Output(PITCH_MOTOR) < 0.0f);
+    assert(Motor_Get_Output(YAW_MOTOR) == 0.0f);
+    mock_imu_pitch = -17.852837f;
+    stabilize_sample(0.0f, 0.0f, 0, 0);
+    assert(Motor_Get_Output(PITCH_MOTOR) > 0.0f);
+    mock_imu_pitch = level; mock_imu_yaw = -179.0f;
+    stabilize_sample(0.0f, 0.0f, 0, 0);
+    assert(fabsf(Motor_Get_Status(YAW_MOTOR)->target_speed_rpm + 2.0f * YAW_POSITION_KP) < 0.001f);
+    assert(submitted_command(YAW_MOTOR) < 0);
+    assert(submitted_command(PITCH_MOTOR) == Motor_Get_Status(PITCH_MOTOR)->voltage_command);
+    puts("PASS IMU: wait calibration, automatic heading capture, level target without encoder clamp, same-sign correction and Yaw wrap");
+
+    /* Synthetic relative-joint plant: IMU observes joint angle + moving base.
+     * This checks that changing base tilt is rejected rather than holding the encoder.
+     * The motor model is illustrative; it does not certify physical tuning. */
+    stabilize_start(0U, 0.0f, level + 15.0f);
+    float joint[2] = {0}, rpm[2] = {0};
+    float base_pitch = 15.0f, base_yaw = 0.0f;
+    for (uint32_t i = 0U; i < 1500U; ++i)
+    {
+        if (i == 500U) { base_pitch = -12.0f; }
+        if (i == 900U) { base_yaw = 3.0f; }
+        mock_imu_pitch = level + base_pitch + joint[PITCH_MOTOR];
+        mock_imu_yaw = base_yaw + joint[YAW_MOTOR];
+        stabilize_sample(joint[YAW_MOTOR], joint[PITCH_MOTOR],
+            (int16_t)lroundf(rpm[YAW_MOTOR]), (int16_t)lroundf(rpm[PITCH_MOTOR]));
+        assert(double_motor_status.state == DOUBLE_MOTOR_RUNNING);
+        for (uint32_t id = 0U; id < MOTOR_AXIS_COUNT; ++id)
+        {
+            assert(fabsf(Motor_Get_Output((Motor_ID)id)) <= MOTOR_VOLTAGE_SAFE_LIMIT);
+            rpm[id] += 0.1f * (Motor_Get_Output((Motor_ID)id) / 15.0f - rpm[id]);
+            joint[id] += rpm[id] * 0.06f;
+        }
+    }
+    assert(fabsf(mock_imu_pitch - level) < 1.0f && fabsf(mock_imu_yaw) < 1.0f);
+    assert(joint[PITCH_MOTOR] > 10.0f && joint[YAW_MOTOR] < -2.0f);
+    printf("PASS synthetic disturbance: Pitch error %.3f deg, Yaw error %.3f deg; encoder joints moved %.2f/%.2f deg\n",
+        (double)(mock_imu_pitch - level), (double)mock_imu_yaw, (double)joint[YAW_MOTOR], (double)joint[PITCH_MOTOR]);
+
+    mock_usart_feed((const uint8_t *)"ST", 2U); IMU_Stabilize_Task.Update();
+    assert(double_motor_status.state == DOUBLE_MOTOR_RUNNING);
+    mock_usart_feed((const uint8_t *)"OP\r\n", 4U); IMU_Stabilize_Task.Update(); zero();
+    assert(double_motor_status.state == DOUBLE_MOTOR_STOPPED);
+    stabilize_sample(joint[YAW_MOTOR], joint[PITCH_MOTOR], 0, 0); zero();
+    assert(double_motor_status.state == DOUBLE_MOTOR_STOPPED);
+
+    stabilize_start(0U, 0.0f, level);
+    stabilize_sample(0.0f, 0.0f, 0, 0);
+    mock_imu_pitch = NAN;
+    stabilize_sample(0.0f, 0.0f, 0, 0); zero();
+    assert(double_motor_status.state == DOUBLE_MOTOR_IMU_ERROR);
+    mock_imu_pitch = level; stabilize_sample(0.0f, 0.0f, 0, 0); zero();
+    assert(double_motor_status.state == DOUBLE_MOTOR_IMU_ERROR);
+
+    stabilize_start(0U, 0.0f, level);
+    stabilize_sample(0.0f, 0.0f, 0, 0);
+    tick += 101U; IMU_Stabilize_Task.Update(); zero();
+    assert(double_motor_status.state == DOUBLE_MOTOR_FEEDBACK_LOST);
+
+    stabilize_start(0U, 0.0f, level);
+    tx_result = HAL_BUSY;
+    stabilize_sample(0.0f, 0.0f, 0, 0);
+    assert(double_motor_status.state == DOUBLE_MOTOR_TX_ERROR);
+    tx_result = HAL_OK; ++tick; IMU_Stabilize_Task.Update(); zero();
+
+    stabilize_start(UINT32_MAX - 5U, 30.0f, level);
+    stabilize_sample(0.0f, 0.0f, 0, 0);
+    assert(double_motor_status.state == DOUBLE_MOTOR_RUNNING);
+    mock_usart_feed((const uint8_t *)"SET 50 120\n", 11U); IMU_Stabilize_Task.Update();
+    assert(double_motor_status.yaw_target_deg == 30.0f && double_motor_status.pitch_target_deg == level);
+    imu_stabilize_stop_requested = 1U; IMU_Stabilize_Task.Update(); zero();
+    assert(double_motor_status.state == DOUBLE_MOTOR_STOPPED);
+    puts("PASS IMU: split STOP latch, invalid/stale sensor stop, CAN loss/TX failure, wrap tick, rejected encoder SET and debugger stop");
 }
 
 int main(void)
@@ -749,6 +889,7 @@ int main(void)
         puts("SKIP historical zero-angle sine startup: current user angle bounds exclude zero");
     }
     test_serial_position();
+    test_imu_stabilize();
     puts("ALL DOUBLE/FIXED/SERIAL POSITION HOST CHECKS PASSED (mock CAN/UART; not physical motion proof)");
     return 0;
 }

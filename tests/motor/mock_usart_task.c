@@ -24,3 +24,10 @@ uint16_t usart_Rx(uint8_t *buffer, uint16_t capacity)
     memmove(serial_input, serial_input + length, serial_count);
     return length;
 }
+
+/* 电机主机测试不连接传感器；两轴可独立注入，避免误用编码器数据。 */
+#include "imu_test.h"
+#include <math.h>
+float mock_imu_yaw = NAN, mock_imu_pitch = NAN;
+float imu_test_get_yaw_angle(void) { return mock_imu_yaw; }
+float imu_test_get_pitch_angle(void) { return mock_imu_pitch; }

@@ -1,5 +1,7 @@
 #include "usart_test.h"
 #include "usart.h"
+#include "imu_test.h"
+#include "motor.h"
 #include <float.h>
 #include <math.h>
 #include <string.h>
@@ -15,7 +17,6 @@ static uint8_t vofa_initialized;
 /* 必须持久保存到中断发送完成；更新前先经 BSP 确认发送空闲。 */
 static uint8_t vofa_packet[36];
 static uint8_t vofa_yaw_speed_enabled;
-static uint8_t vofa_motor_position_enabled;
 static volatile HAL_StatusTypeDef vofa_tx_status = HAL_BUSY;
 static volatile uint32_t vofa_tx_submitted, vofa_tx_dropped;
 /* 调试器查看本次IMU打包值及 vofa_packet[0..35]，不插入 printf。 */
@@ -42,19 +43,17 @@ void vofa_task_init(void)
     vofa_tx_submitted = vofa_tx_dropped = 0U;
     vofa_initialized = 1U;
     vofa_yaw_speed_enabled = 0U;
-    vofa_motor_position_enabled = 0U;
     /* 不改写 vofa_packet，重复初始化也不能破坏正在发送的帧。 */
 }
 
 void vofa_task_enable_yaw_speed(void)
 {
     vofa_yaw_speed_enabled = 1U;
-    vofa_motor_position_enabled = 0U;
 }
 
 void vofa_task_enable_motor_position(void)
 {
-    vofa_motor_position_enabled = 1U;
+    /* 默认六路已同时包含IMU、编码器角度和两轴输出。 */
     vofa_yaw_speed_enabled = 0U;
 }
 
@@ -74,29 +73,35 @@ void vofa_task_update(void)
     }
     const imu_vofa_data_t sample = imu_vofa_data;
     vofa_debug_sample = sample;
-    /* 逐通道写入固定偏移；上面的编译期检查保证32位float与小端字节序。 */
-    memcpy(&vofa_packet[0],  &sample.pitch_angle, 4U); /* CH0: Pitch deg */
-    memcpy(&vofa_packet[4],  &sample.yaw_angle,   4U); /* CH1: Yaw deg */
-    memcpy(&vofa_packet[8],  &sample.accel_x,     4U); /* CH2: Acc X m/s^2 */
-    memcpy(&vofa_packet[12], &sample.accel_y,     4U); /* CH3: Acc Y m/s^2 */
-    uint16_t tail = 16U;
-    if (vofa_motor_position_enabled)
-    {
-        const motor_channel_t yaw_sample = yaw_channel;
-        const motor_channel_t pitch_sample = pitch_channel;
-        memcpy(&vofa_packet[0], &yaw_sample.target_angle, 4U);
-        memcpy(&vofa_packet[4], &yaw_sample.current_angle, 4U);
-        memcpy(&vofa_packet[8], &pitch_sample.target_angle, 4U);
-        memcpy(&vofa_packet[12], &pitch_sample.current_angle, 4U);
-    }
+    /* 默认六路诊断：IMU Yaw/Pitch、编码器Yaw/Pitch、最终输出Yaw/Pitch。 */
+    uint16_t tail;
     if (vofa_yaw_speed_enabled)
     {
+        /* 保留原正弦速度测试的八路映射。 */
+        memcpy(&vofa_packet[0], &sample.pitch_angle, 4U);
+        memcpy(&vofa_packet[4], &sample.yaw_angle, 4U);
+        memcpy(&vofa_packet[8], &sample.accel_x, 4U);
+        memcpy(&vofa_packet[12], &sample.accel_y, 4U);
         const motor_channel_t motor_sample = yaw_channel;
-        memcpy(&vofa_packet[16], &motor_sample.target_speed, 4U);       /* CH4 rpm */
-        memcpy(&vofa_packet[20], &motor_sample.current_speed, 4U);      /* CH5 rpm */
-        memcpy(&vofa_packet[24], &motor_sample.velocity_ff_output, 4U); /* CH6: pure ff_out */
-        memcpy(&vofa_packet[28], &motor_sample.speed_pid_output, 4U);   /* CH7: pure pid_out */
+        memcpy(&vofa_packet[16], &motor_sample.target_speed, 4U);
+        memcpy(&vofa_packet[20], &motor_sample.current_speed, 4U);
+        memcpy(&vofa_packet[24], &motor_sample.velocity_ff_output, 4U);
+        memcpy(&vofa_packet[28], &motor_sample.speed_pid_output, 4U);
         tail = 32U;
+    }
+    else
+    {
+        uint32_t motor_now = HAL_GetTick();
+        const Motor_ControlStatus *yaw = Motor_Get_Status(YAW_MOTOR);
+        const Motor_ControlStatus *pitch = Motor_Get_Status(PITCH_MOTOR);
+        const float channels[6] = {
+            imu_test_get_yaw_angle(), imu_test_get_pitch_angle(),
+            motor_IsOnline(&yaw->feedback, motor_now) ? Get_Current_Angle(YAW_MOTOR) : NAN,
+            motor_IsOnline(&pitch->feedback, motor_now) ? Get_Current_Angle(PITCH_MOTOR) : NAN,
+            Motor_Get_Output(YAW_MOTOR), Motor_Get_Output(PITCH_MOTOR)
+        };
+        memcpy(vofa_packet, channels, sizeof(channels));
+        tail = sizeof(channels);
     }
     vofa_packet[tail] = 0x00U;
     vofa_packet[tail + 1U] = 0x00U;

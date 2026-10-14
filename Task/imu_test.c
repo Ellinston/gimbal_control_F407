@@ -395,12 +395,27 @@ static uint32_t angle_last_sensor_time, angle_last_read_ms, angle_last_print_ms;
 static uint8_t angle_started, angle_have_time;
 static float angle_accel_ms2[2];
 
+static uint8_t IMU_AngleDataAvailable(uint32_t now)
+{
+    return (uint8_t)(imu_init_passed && angle_have_time && imu_angle.samples != 0U &&
+        (imu_angle.read_status == BMI270_NO_ERROR || imu_angle.read_status == BMI270_NOT_READY) &&
+        (uint32_t)(now - imu_angle.last_sample_ms) <= 100U);
+}
+
+float imu_test_get_yaw_angle(void)
+{
+    return imu_angle.ready && IMU_AngleDataAvailable(HAL_GetTick()) ? imu_angle.yaw_deg : NAN;
+}
+
+float imu_test_get_pitch_angle(void)
+{
+    return imu_angle.ready && IMU_AngleDataAvailable(HAL_GetTick()) ? imu_angle.pitch_deg : NAN;
+}
+
 static void IMU_UpdateVofaData(uint32_t now)
 {
     imu_vofa_data = (imu_vofa_data_t){NAN, NAN, NAN, NAN};
-    if (!imu_init_passed || !angle_have_time || imu_angle.samples == 0U ||
-        (imu_angle.read_status != BMI270_NO_ERROR && imu_angle.read_status != BMI270_NOT_READY) ||
-        (uint32_t)(now - imu_angle.last_sample_ms) > 100U) { return; }
+    if (!IMU_AngleDataAvailable(now)) { return; }
     imu_vofa_data.accel_x = angle_accel_ms2[0];
     imu_vofa_data.accel_y = angle_accel_ms2[1];
     if (imu_angle.ready)

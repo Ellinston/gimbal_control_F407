@@ -27,6 +27,11 @@ void Task_IMU_Data_Test(void);
  * 首次包含初始化检查，异常不输出旧角度。 */
 void IMU_Angle_Test(void);
 
+/* 只读最新解算结果，不采样；标定未完成、读取错误或超过100ms返回NaN。
+ * 单位deg：Yaw为标定后相对角，Pitch为重力参考角，均在[-180,180)。 */
+float imu_test_get_yaw_angle(void);
+float imu_test_get_pitch_angle(void);
+
 /* 主循环反复调用，当前调度 IMU_Angle_Test。 */
 void IMU_Test(void);
 

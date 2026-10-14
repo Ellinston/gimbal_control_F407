@@ -89,8 +89,8 @@ uint8_t motor_IsOnline(const Motor *motor, uint32_t now_ms);
 
 /* 双轴闭环接口：逻辑轴与当前工程拨码对应，不能与其他电机任务同时调度。 */
 typedef enum { YAW_MOTOR = 0, PITCH_MOTOR, MOTOR_AXIS_COUNT } Motor_ID;
-#define MOTOR_YAW_CAN_ID 1U
-#define MOTOR_PITCH_CAN_ID 2U
+#define MOTOR_YAW_CAN_ID 2U
+#define MOTOR_PITCH_CAN_ID 1U
 #define MOTOR_CONTROL_SPEED_LIMIT_RPM 30.0f
 #define MOTOR_YAW_MIN_DEG 0.0f
 #define MOTOR_YAW_MAX_DEG 180.0f
@@ -118,7 +118,8 @@ typedef struct
 #define CLAMP(x, min, max) ((x) < (min) ? (min) : ((x) > (max) ? (max) : (x)))
 #endif
 
-typedef enum { MOTOR_CONTROL_DISABLED = 0, MOTOR_CONTROL_SPEED, MOTOR_CONTROL_ANGLE } Motor_ControlMode;
+typedef enum { MOTOR_CONTROL_DISABLED = 0, MOTOR_CONTROL_SPEED, MOTOR_CONTROL_ANGLE,
+               MOTOR_CONTROL_IMU_ANGLE } Motor_ControlMode;
 typedef struct
 {
     Motor feedback;
@@ -144,6 +145,10 @@ const Motor_ControlStatus *Motor_Get_Status(Motor_ID motor);
 void Motor_Set_Speed(Motor_ID motor, float speed);
 float Motor_Generate_Sine_Speed(float amplitude_rpm, float frequency_hz, float time_s);
 void Motor_Set_Angle(Motor_ID motor, float angle);
+/* IMU位置模式：目标为IMU参考角deg，不套用编码器目标范围；
+ * 最短角差生成目标rpm，两轴方向按本轮实测同号。机械行程由Task检查编码器。
+ * 无效目标停止两轴；IMU失效/电机反馈丢失由Update清零。 */
+void Motor_Set_IMU_Angle(Motor_ID motor, float angle);
 /* 每轴独立设置前馈系数，单位为电压原始控制码/rpm；默认 0。
  * 无效轴或非有限系数被忽略；速度模式和位置串级模式共用。 */
 void Motor_Set_Velocity_Feedforward_Gain(Motor_ID motor, float gain);
@@ -152,6 +157,10 @@ void Motor_Set_Velocity_Feedforward_Gain(Motor_ID motor, float gain);
 void Motor_PID_Control(Motor_ID motor, float target_angle);
 float Motor_Get_Angle(Motor_ID motor); /* 无临时参考/无效轴返回 NaN，在线状态另查。 */
 float Get_Current_Angle(Motor_ID motor); /* 统一位置反馈入口，当前返回编码器角度。 */
+/* IMU角度deg，与编码器启动参考不同；有效轴的数据无效时返回NaN，无效轴返回0。 */
+float Get_Current_IMU_Angle(Motor_ID motor);
+/* PID与前馈相加并限幅后的电压控制码；停止/无效轴返回0，不是伏特或实测电压。 */
+float Motor_Get_Output(Motor_ID motor);
 HAL_StatusTypeDef Motor_Control_Update(float dt_s);
 void Motor_Control_Stop(void); /* 清目标模式、输出和 PID 历史，不提交 CAN。 */
 

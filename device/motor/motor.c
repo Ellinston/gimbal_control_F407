@@ -2,6 +2,7 @@
 #include "can.h"
 #include "pid.h"
 #include "velocity_feedforward.h"
+#include "imu_test.h"
 #include <math.h>
 #include <string.h>
 
@@ -216,6 +217,22 @@ void Motor_Set_Angle(Motor_ID motor, float angle)
         CLAMP(angle, MOTOR_PITCH_MIN_DEG, MOTOR_PITCH_MAX_DEG);
 }
 
+static float motor_WrapDegrees(float angle)
+{
+    angle = fmodf(angle, 360.0f);
+    if (angle >= 180.0f) { angle -= 360.0f; }
+    if (angle < -180.0f) { angle += 360.0f; }
+    return angle;
+}
+
+void Motor_Set_IMU_Angle(Motor_ID motor, float angle)
+{
+    if (!valid_axis(motor)) { return; }
+    if (!isfinite(angle)) { Motor_Control_Stop(); return; }
+    select_mode(motor, MOTOR_CONTROL_IMU_ANGLE);
+    axes[motor].target_angle_deg = motor_WrapDegrees(angle);
+}
+
 void Motor_Set_Velocity_Feedforward_Gain(Motor_ID motor, float gain)
 {
     if (!valid_axis(motor) || !isfinite(gain)) { return; }
@@ -237,6 +254,7 @@ HAL_StatusTypeDef Motor_Control_Update(float dt_s)
     if (!control_initialized) { return HAL_ERROR; }
     int16_t commands[4] = {0};
     uint32_t now = HAL_GetTick();
+    float angle_feedback[MOTOR_AXIS_COUNT] = {NAN, NAN};
     if (!isfinite(dt_s) || dt_s <= 0.0f || dt_s > 0.1f)
     {
         Motor_Control_Stop();
@@ -245,9 +263,18 @@ HAL_StatusTypeDef Motor_Control_Update(float dt_s)
     {
         /* 单轴速度测试不依赖禁用轴的反馈；启用两轴时仍检查两轴。 */
         if (axes[i].mode == MOTOR_CONTROL_DISABLED) { continue; }
+        if (axes[i].mode == MOTOR_CONTROL_ANGLE)
+        {
+            angle_feedback[i] = Get_Current_Angle((Motor_ID)i);
+        }
+        else if (axes[i].mode == MOTOR_CONTROL_IMU_ANGLE)
+        {
+            angle_feedback[i] = Get_Current_IMU_Angle((Motor_ID)i);
+        }
         if (!axes[i].reference_valid || !motor_IsOnline(&axes[i].feedback, now) ||
             (axes[i].rx_status != HAL_OK && axes[i].rx_status != HAL_BUSY) ||
-            (axes[i].mode == MOTOR_CONTROL_ANGLE && !isfinite(Get_Current_Angle((Motor_ID)i))))
+            ((axes[i].mode == MOTOR_CONTROL_ANGLE || axes[i].mode == MOTOR_CONTROL_IMU_ANGLE) &&
+             !isfinite(angle_feedback[i])))
         {
             Motor_Control_Stop();
             break;
@@ -259,14 +286,17 @@ HAL_StatusTypeDef Motor_Control_Update(float dt_s)
         float output = 0.0f;
         axis->speed_pid_output = 0.0f;
         axis->velocity_ff_output = 0.0f;
-        if (axis->mode == MOTOR_CONTROL_ANGLE)
+        if (axis->mode == MOTOR_CONTROL_ANGLE || axis->mode == MOTOR_CONTROL_IMU_ANGLE)
         {
-            /* 外环只生成目标转速；内环与速度模式使用相同的反馈和输出链。 */
+            /* IMU坐标与机械坐标独立；只在IMU模式中取跨±180°的最短角差。 */
+            float error = axis->target_angle_deg - angle_feedback[i];
+            if (axis->mode == MOTOR_CONTROL_IMU_ANGLE) { error = motor_WrapDegrees(error); }
             axis->target_speed_rpm = CLAMP(PID_Position_Calculate(&angle_pid[i],
-                axis->target_angle_deg - Get_Current_Angle((Motor_ID)i), dt_s),
+                error, dt_s),
                 -MOTOR_CONTROL_SPEED_LIMIT_RPM, MOTOR_CONTROL_SPEED_LIMIT_RPM);
         }
-        if (axis->mode == MOTOR_CONTROL_ANGLE || axis->mode == MOTOR_CONTROL_SPEED)
+        if (axis->mode == MOTOR_CONTROL_ANGLE || axis->mode == MOTOR_CONTROL_IMU_ANGLE ||
+            axis->mode == MOTOR_CONTROL_SPEED)
         {
             /* PID输入只含目标与反馈之差；前馈旁路叠加在PID输出端。 */
             float pid_out;
@@ -299,4 +329,16 @@ HAL_StatusTypeDef Motor_Control_Update(float dt_s)
 float Get_Current_Angle(Motor_ID motor)
 {
     return Motor_Get_Angle(motor);
+}
+
+float Get_Current_IMU_Angle(Motor_ID motor)
+{
+    if (motor == YAW_MOTOR) { return imu_test_get_yaw_angle(); }
+    if (motor == PITCH_MOTOR) { return imu_test_get_pitch_angle(); }
+    return 0.0f;
+}
+
+float Motor_Get_Output(Motor_ID motor)
+{
+    return valid_axis(motor) ? (float)axes[motor].voltage_command : 0.0f;
 }

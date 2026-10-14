@@ -50,6 +50,15 @@ HAL_StatusTypeDef HAL_UART_AbortReceive(UART_HandleTypeDef *uart)
 #include "../../Bsp/usart/usart.c"
 #include "../../Task/usart_test.c"
 
+/* 本套件验证BSP异步发送和打包；电机/IMU端使用可辨认的独立数值。 */
+static Motor_ControlStatus mock_axes[MOTOR_AXIS_COUNT];
+const Motor_ControlStatus *Motor_Get_Status(Motor_ID motor) { return &mock_axes[motor]; }
+uint8_t motor_IsOnline(const Motor *motor, uint32_t now) { (void)motor; (void)now; return 1U; }
+float Get_Current_Angle(Motor_ID motor) { return motor == YAW_MOTOR ? 70.0f : 100.0f; }
+float Motor_Get_Output(Motor_ID motor) { return motor == YAW_MOTOR ? 500.0f : -1000.0f; }
+float imu_test_get_yaw_angle(void) { return imu_vofa_data.yaw_angle; }
+float imu_test_get_pitch_angle(void) { return imu_vofa_data.pitch_angle; }
+
 static void feed(uint8_t value)
 {
     assert(huart1.RxState == HAL_UART_STATE_BUSY_RX);
@@ -72,11 +81,13 @@ static void finish_tx(void)
 
 static void test_vofa(void)
 {
-    const uint8_t expected[20] = {
-        0x00, 0x00, 0xF0, 0x41, /* 30 */
-        0x00, 0x00, 0xA0, 0xBF, /* -1.25 */
+    const uint8_t expected[28] = {
+        0x00, 0x00, 0xA0, 0xBF, /* IMU Yaw -1.25 */
+        0x00, 0x00, 0xF0, 0x41, /* IMU Pitch 30 */
         0x00, 0x00, 0x8C, 0x42, /* 70 */
         0x00, 0x00, 0xC8, 0x42, /* 100 */
+        0x00, 0x00, 0xFA, 0x43, /* Yaw output 500 */
+        0x00, 0x00, 0x7A, 0xC4, /* Pitch output -1000 */
         0x00, 0x00, 0x80, 0x7F
     };
     tick = 0U; transmit_calls = 0U;
@@ -91,7 +102,7 @@ static void test_vofa(void)
     assert(vofa_debug_sample.pitch_angle == 30.0f && vofa_debug_sample.yaw_angle == -1.25f);
     assert(vofa_debug_sample.accel_x == 70.0f && vofa_debug_sample.accel_y == 100.0f);
     /* 仅在主机测试控制台打印，不会进入固件 USART1 数据流。 */
-    printf("JustFloat test sample: Pitch=%.2f Yaw=%.2f AccelX=%.2f AccelY=%.2f\n",
+    printf("IMU test snapshot: Pitch=%.2f Yaw=%.2f AccelX=%.2f AccelY=%.2f\n",
            (double)vofa_debug_sample.pitch_angle, (double)vofa_debug_sample.yaw_angle,
            (double)vofa_debug_sample.accel_x, (double)vofa_debug_sample.accel_y);
     printf("JustFloat bytes (%u):", (unsigned)transmit_length);
@@ -108,22 +119,22 @@ static void test_vofa(void)
     tick = 310U; vofa_task_update(); assert(transmit_calls == 1U);
     tick = 400U; vofa_task_update();
     float actual;
-    memcpy(&actual, transmit_target + 4U, sizeof(actual));
+    memcpy(&actual, transmit_target + 0U, sizeof(actual));
     assert(transmit_calls == 2U && actual == 42.0f);
     huart1.gState = HAL_UART_STATE_READY;
     transmit_result = HAL_ERROR; tick = 500U; vofa_task_update();
     assert(vofa_tx_status == HAL_ERROR && vofa_tx_dropped == 3U);
     transmit_result = HAL_OK; tick = 600U; vofa_task_update();
     assert(transmit_calls == 3U && vofa_tx_submitted == 3U);
-    uint8_t snapshot[20]; memcpy(snapshot, transmit_target, sizeof(snapshot));
+    uint8_t snapshot[28]; memcpy(snapshot, transmit_target, sizeof(snapshot));
     tick = UINT32_MAX - 49U; vofa_task_init();
     assert(memcmp(snapshot, transmit_target, sizeof(snapshot)) == 0);
     huart1.gState = HAL_UART_STATE_READY;
     tick = 49U; vofa_task_update(); assert(transmit_calls == 3U);
     tick = 50U; vofa_task_update(); assert(transmit_calls == 4U);
-    memcpy(&actual, transmit_target + 4U, sizeof(actual)); assert(isnan(actual));
+    memcpy(&actual, transmit_target + 0U, sizeof(actual)); assert(isnan(actual));
     huart1.gState = HAL_UART_STATE_READY;
-    puts("PASS VOFA: exact 20-byte JustFloat, channel order, 100ms cadence, busy buffer lifetime,");
+    puts("PASS VOFA: exact 28-byte six-channel JustFloat, channel order, 100ms cadence, busy buffer lifetime,");
     puts("           dropped periods, TX error recovery, reinitialization and tick wrap.");
 }
 

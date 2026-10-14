@@ -20,18 +20,21 @@ typedef struct {
     float speed_pid_output;   /* PID输出分量，GM6020电压控制码，求和前。 */
 } motor_channel_t;
 
-/* 电机测试更新；位置测试发送双轴角度，正弦测试发送YAW速度。 */
+/* 电机测试更新；正弦速度模式使用YAW速度与PID/前馈分量。 */
 extern motor_channel_t yaw_channel;
 extern motor_channel_t pitch_channel;
 
 /* USART1 初始化后调用；不启动串口接收。 */
 void vofa_task_init(void);
-/* 默认四路IMU；启用后追加CH4目标rpm、CH5实际rpm、CH6前馈、CH7 PID。 */
+/* 正弦速度测试保留八路：CH0 Pitch、CH1 Yaw、CH2 Acc X、CH3 Acc Y；
+ * CH4目标rpm、CH5实际rpm、CH6前馈、CH7 PID。 */
 void vofa_task_enable_yaw_speed(void);
-/* 切换为四路位置：CH0 YAW目标，CH1 YAW实际，CH2 PITCH目标，CH3 PITCH实际。 */
+/* 位置测试切回默认六路诊断映射。 */
 void vofa_task_enable_motor_position(void);
-/* 每100ms非阻塞JustFloat：默认四路IMU，可切换四路位置或追加四路YAW速度。
- * 末尾00 00 80 7F，总长20或36字节。
+/* 每100ms非阻塞JustFloat：默认CH0 IMU Yaw、CH1 IMU Pitch、
+ * CH2编码器Yaw、CH3编码器Pitch（deg）；CH4 Yaw输出、CH5 Pitch输出（电压控制码）。
+ * IMU未就绪/失效、编码器无参考/过期的角度为NaN。
+ * 末尾00 00 80 7F，六路28字节；正弦速度模式八路36字节。
  * 串口忙/失败时丢弃本周期，不补发积压数据；不可混调文本输出任务。 */
 void vofa_task_update(void);
 
