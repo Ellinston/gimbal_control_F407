@@ -54,15 +54,14 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Bsp/usart/usart.c
     Bsp/can/can.c
     Bsp/Algorithm/pid.c
+    Bsp/Algorithm/velocity_feedforward.c
     Task/can_test.c
-    Task/motor_task.c
-    Task/motor_single_test.c
+    Task/motor_test.c
     Task/usart_test.c
     Task/imu_test.c
     device/BMI270/BMI270Middleware.c
     device/BMI270/BMI270driver.c
     device/motor/motor.c
-    device/motor/motor_control.c
 )
 
 # Add include paths

@@ -13,10 +13,12 @@ motor_channel_t pitch_channel;
 static uint32_t vofa_last_sample_ms;
 static uint8_t vofa_initialized;
 /* 必须持久保存到中断发送完成；更新前先经 BSP 确认发送空闲。 */
-static uint8_t vofa_packet[20];
+static uint8_t vofa_packet[36];
+static uint8_t vofa_yaw_speed_enabled;
+static uint8_t vofa_motor_position_enabled;
 static volatile HAL_StatusTypeDef vofa_tx_status = HAL_BUSY;
 static volatile uint32_t vofa_tx_submitted, vofa_tx_dropped;
-/* 调试器查看本次打包值及 vofa_packet[0..19]，不向 USART1 插入 printf。 */
+/* 调试器查看本次IMU打包值及 vofa_packet[0..35]，不插入 printf。 */
 static volatile imu_vofa_data_t vofa_debug_sample;
 
 _Static_assert(sizeof(float) == 4U, "JustFloat requires 32-bit floats");
@@ -29,13 +31,31 @@ void vofa_task_init(void)
 {
     imu_vofa_data = (imu_vofa_data_t){NAN, NAN, NAN, NAN};
     vofa_debug_sample = imu_vofa_data;
-    yaw_channel = (motor_channel_t){0.0f, NAN, 0.0f, NAN};
+    yaw_channel = (motor_channel_t){
+        .target_angle = 0.0f, .current_angle = NAN,
+        .target_speed = 0.0f, .current_speed = NAN,
+        .velocity_ff_output = 0.0f, .speed_pid_output = 0.0f
+    };
     pitch_channel = yaw_channel;
     vofa_last_sample_ms = usart_GetTick();
     vofa_tx_status = HAL_BUSY;
     vofa_tx_submitted = vofa_tx_dropped = 0U;
     vofa_initialized = 1U;
+    vofa_yaw_speed_enabled = 0U;
+    vofa_motor_position_enabled = 0U;
     /* 不改写 vofa_packet，重复初始化也不能破坏正在发送的帧。 */
+}
+
+void vofa_task_enable_yaw_speed(void)
+{
+    vofa_yaw_speed_enabled = 1U;
+    vofa_motor_position_enabled = 0U;
+}
+
+void vofa_task_enable_motor_position(void)
+{
+    vofa_motor_position_enabled = 1U;
+    vofa_yaw_speed_enabled = 0U;
 }
 
 void vofa_task_update(void)
@@ -59,11 +79,30 @@ void vofa_task_update(void)
     memcpy(&vofa_packet[4],  &sample.yaw_angle,   4U); /* CH1: Yaw deg */
     memcpy(&vofa_packet[8],  &sample.accel_x,     4U); /* CH2: Acc X m/s^2 */
     memcpy(&vofa_packet[12], &sample.accel_y,     4U); /* CH3: Acc Y m/s^2 */
-    vofa_packet[16] = 0x00U;
-    vofa_packet[17] = 0x00U;
-    vofa_packet[18] = 0x80U;
-    vofa_packet[19] = 0x7FU;
-    vofa_tx_status = usart_Tx(vofa_packet, sizeof(vofa_packet));
+    uint16_t tail = 16U;
+    if (vofa_motor_position_enabled)
+    {
+        const motor_channel_t yaw_sample = yaw_channel;
+        const motor_channel_t pitch_sample = pitch_channel;
+        memcpy(&vofa_packet[0], &yaw_sample.target_angle, 4U);
+        memcpy(&vofa_packet[4], &yaw_sample.current_angle, 4U);
+        memcpy(&vofa_packet[8], &pitch_sample.target_angle, 4U);
+        memcpy(&vofa_packet[12], &pitch_sample.current_angle, 4U);
+    }
+    if (vofa_yaw_speed_enabled)
+    {
+        const motor_channel_t motor_sample = yaw_channel;
+        memcpy(&vofa_packet[16], &motor_sample.target_speed, 4U);       /* CH4 rpm */
+        memcpy(&vofa_packet[20], &motor_sample.current_speed, 4U);      /* CH5 rpm */
+        memcpy(&vofa_packet[24], &motor_sample.velocity_ff_output, 4U); /* CH6: pure ff_out */
+        memcpy(&vofa_packet[28], &motor_sample.speed_pid_output, 4U);   /* CH7: pure pid_out */
+        tail = 32U;
+    }
+    vofa_packet[tail] = 0x00U;
+    vofa_packet[tail + 1U] = 0x00U;
+    vofa_packet[tail + 2U] = 0x80U;
+    vofa_packet[tail + 3U] = 0x7FU;
+    vofa_tx_status = usart_Tx(vofa_packet, tail + 4U);
     if (vofa_tx_status == HAL_OK) { ++vofa_tx_submitted; }
     else { ++vofa_tx_dropped; }
 }

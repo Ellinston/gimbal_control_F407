@@ -16,7 +16,7 @@
 - 已完成串口和 BMI270 驱动；2026-10-12 使用 ARM GCC 13.3.1、CMake 和 Ninja 编译链接，并通过 ST-Link/OpenOCD 烧录、校验和复位，产物为 `build/Debug/gimbal_1.elf`。串口及 IMU 已通过 COM6 实物检查，详细证据见 [IMU 模块验收](说明书/IMU模块验收.md)。
 - USART1 中断收发及 `PING\n → PONG\n` 测试源码保留，当前调度 IMU 角度任务及 `Task/usart_test` 中的 VOFA 任务，不调度 PING 测试。BMI270 完整驱动位于 [device/BMI270](device/BMI270)。串口接口见 [串口模块验收](说明书/串口模块验收.md)。当前只输出四通道 JustFloat，不混入启动诊断或周期文本、不处理串口命令。
 
-电机驱动与任务接口见 [电机模块接口](说明书/电机模块接口.md)：`motor.c` 提供 GM6020 电压组帧和反馈解析，`motor_control.c` 提供速度/角度及 `Motor_PID_Control` 接口；[固定目标位置任务](说明书/PID固定目标位置环.md)、旧开环、固定1000、单轴 PID 和双轴往返测试源码保留，当前均不调度。
+电机驱动与任务接口见 [电机模块接口](说明书/电机模块接口.md)：`motor.c` 提供 GM6020 电压组帧和反馈解析，`motor_control.c` 提供速度/角度串级、速度前馈及 `Motor_PID_Control` 接口；[固定目标位置任务](说明书/PID固定目标位置环.md)、旧开环、固定1000、单轴 PID 和双轴往返测试源码保留，当前均不调度。
 
 ## 协作方法
 
@@ -157,7 +157,7 @@ VOFA 端的串口参数同样设为 **115200、8N1**。COM 号按当前电脑识
 
 ### 6. LED、IMU 与后续外设
 
-当前 IOC 启用了 **RCC、SYS、NVIC、CAN1、USART1、SPI1**。当前任务使用 CAN1 与 USART1；SPI1 保留外设初始化，IMU Task 暂不调度；后续按上述模块顺序推进。
+当前 IOC 启用了 **RCC、SYS、NVIC、CAN1、USART1、SPI1**。当前 IMU/VOFA 任务使用 SPI1 与 USART1；CAN1 已初始化，电机 Task 暂不调度。电机串级速度环与前馈代码已保留，待综合测试时切换任务并验证曲线。
 
 **LED：原理图第 1 页的 LED4、LED5、LED6 分别直接连接 3.3 V、5 V、24 V 电源，经限流电阻接地，未连接 MCU GPIO，属于电源指示灯。不能通过程序控制它们亮灭。** LED 模块需由用户确定外接 LED 的可用 GPIO、限流电阻及有效电平，或者提供实物上另外存在的可控 LED 接线；确定后再给出 CubeMX 配置。
 

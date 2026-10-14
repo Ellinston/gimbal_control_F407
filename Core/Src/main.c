@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include "imu_test.h"
 #include "usart_test.h"
+#include "motor_test.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,7 +49,8 @@ UART_HandleTypeDef huart1;
 SPI_HandleTypeDef hspi1;
 
 /* USER CODE BEGIN PV */
-
+/* 改为 &Sine_Speed_Task 可运行原正弦速度测试；两种测试互斥调度。 */
+static const Task_Interface_t * const motor_test = &Serial_Position_Task;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -102,6 +104,11 @@ int main(void)
   IMU_TestInit();
   vofa_task_init();
   IMU_TestSetTextOutput(0U); /* USART1 仅发送 JustFloat，包含启动阶段。 */
+  IMU_Angle_Test(); /* 先完成可能阻塞的传感器初始化，再启动电机任务计时。 */
+  motor_test->Init();
+  /* 前馈算法无状态，无独立Init；复用现有控制入口组合两轴前馈系数。 */
+  Motor_Set_Velocity_Feedforward_Gain(YAW_MOTOR, YAW_VELOCITY_FF_GAIN);
+  Motor_Set_Velocity_Feedforward_Gain(PITCH_MOTOR, PITCH_VELOCITY_FF_GAIN);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -112,8 +119,9 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     IMU_Angle_Test();
+    motor_test->Update();
     vofa_task_update();
-    HAL_Delay(10);
+    HAL_Delay(1); /* 控制任务内部10ms门控，VOFA内部100ms门控。 */
   }
   /* USER CODE END 3 */
 }

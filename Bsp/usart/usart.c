@@ -85,6 +85,11 @@ uint32_t usart_GetTick(void)
     return HAL_GetTick();
 }
 
+uint32_t usart_GetRxFaultCount(void)
+{
+    return rx_overflow_count + rx_error_count + rx_restart_failure_count;
+}
+
 uint16_t usart_Rx(uint8_t *buffer, uint16_t capacity)
 {
     uint16_t count = 0U;

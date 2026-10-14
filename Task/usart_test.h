@@ -14,17 +14,24 @@ extern imu_vofa_data_t imu_vofa_data;
 typedef struct {
     float target_angle;   /* 目标角度，deg，沿用位置环临时参考。 */
     float current_angle;  /* 当前角度，deg；未建立参考/反馈过期为 NaN。 */
-    float target_speed;   /* 目标速度，rpm；当前直接位置环不生成速度目标。 */
+    float target_speed;   /* 目标速度，rpm；来自速度给定或位置外环。 */
     float current_speed;  /* 当前速度，rpm；无有效反馈为 NaN。 */
+    float velocity_ff_output; /* 前馈分量，GM6020电压控制码，最终限幅前。 */
+    float speed_pid_output;   /* PID输出分量，GM6020电压控制码，求和前。 */
 } motor_channel_t;
 
-/* 保留电机任务的数据接口；当前 IMU 模式不发送这两组数据。 */
+/* 电机测试更新；位置测试发送双轴角度，正弦测试发送YAW速度。 */
 extern motor_channel_t yaw_channel;
 extern motor_channel_t pitch_channel;
 
 /* USART1 初始化后调用；不启动串口接收。 */
 void vofa_task_init(void);
-/* 非阻塞 JustFloat：Pitch、Yaw、Acc X、Acc Y，末尾00 00 80 7F。
+/* 默认四路IMU；启用后追加CH4目标rpm、CH5实际rpm、CH6前馈、CH7 PID。 */
+void vofa_task_enable_yaw_speed(void);
+/* 切换为四路位置：CH0 YAW目标，CH1 YAW实际，CH2 PITCH目标，CH3 PITCH实际。 */
+void vofa_task_enable_motor_position(void);
+/* 每100ms非阻塞JustFloat：默认四路IMU，可切换四路位置或追加四路YAW速度。
+ * 末尾00 00 80 7F，总长20或36字节。
  * 串口忙/失败时丢弃本周期，不补发积压数据；不可混调文本输出任务。 */
 void vofa_task_update(void);
 

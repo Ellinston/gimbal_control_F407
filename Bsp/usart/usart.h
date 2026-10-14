@@ -33,6 +33,8 @@ HAL_StatusTypeDef usart_Tx(const uint8_t *data, uint16_t length);
 uint8_t usart_TxReady(void);
 /* 串口任务使用的毫秒时基，按 uint32_t 差值处理回绕。 */
 uint32_t usart_GetTick(void);
+/* 接收错误/丢字节累计值；解析任务可据此拒绝可能损坏的命令。 */
+uint32_t usart_GetRxFaultCount(void);
 
 /**
  * @brief 取出已接收的数据，立即返回，不等待新数据。

@@ -17,6 +17,7 @@ static uint16_t inflight_length;
 
 uint32_t HAL_GetTick(void) { return tick; }
 HAL_StatusTypeDef can_Init(void) { return HAL_OK; }
+HAL_StatusTypeDef can_AbortTx(void) { return HAL_OK; }
 HAL_StatusTypeDef can_Tx(uint32_t id, const uint8_t *data, uint8_t length)
 {
     ++attempts;

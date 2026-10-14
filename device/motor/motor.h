@@ -8,7 +8,7 @@ extern "C" {
 #endif
 
 #define MOTOR_VOLTAGE_COMMAND_MAX 25000
-#define MOTOR_VOLTAGE_SAFE_LIMIT 3000 /* 本轮阶梯试验上限，不代表电流/力/转速。 */
+#define MOTOR_VOLTAGE_SAFE_LIMIT 6000 /* 本轮位置响应实测限幅，单位为电压控制码。 */
 #define MOTOR_FEEDBACK_TIMEOUT_MS 100U
 
 /* GM6020 CAN 电压模式。只在主循环调用，CAN 中断仍由 Bsp 处理。 */
@@ -30,7 +30,7 @@ HAL_StatusTypeDef motor_Init(Motor *motor, uint8_t id);
 
 /* 整组发送，first_id 只能为 1（0x1FF）或 5（0x2FF）。
  * 数组四项分别对应连续四个拨码编号；5 组第四项必须为 0。
- * 每项为电压给定原始值，不是伏特；发送前强制限幅到 ±3000。
+ * 每项为电压给定原始值，不是伏特；发送前按 MOTOR_VOLTAGE_SAFE_LIMIT 限幅。
  * HAL_OK 仅表示提交 CAN 邮箱；HAL_BUSY/ERROR 原样返回。
  * 同一组必须由一个调用者统一填写所有槽，避免覆盖其他电机命令。 */
 HAL_StatusTypeDef motor_Tx(uint8_t first_id, const int16_t voltage_command[4]);
@@ -51,11 +51,47 @@ const Motor_TxFrame *motor_GetLastTxFrame(void);
 HAL_StatusTypeDef motor_Rx(Motor *motor);
 uint8_t motor_IsOnline(const Motor *motor, uint32_t now_ms);
 
+/* ================= 两轴调参区（修改后重新编译、烧录）=================
+ * 每个轴的参数和 PID 状态独立。位置环输出目标 rpm，速度环输出电压码。
+ * 以下位置环增益是串级控制的保守初值，尚需实机整定。
+ * 目标角度沿用启动参考：YAW=0°，PITCH=100°。 */
+
+/* YAW：位置环 PID 与固定目标角度。 */
+#define YAW_POSITION_KP              5.0f
+#define YAW_POSITION_KI              0.0f
+#define YAW_POSITION_KD              0.0f
+#define YAW_POSITION_MAX_OUTPUT      100.0f
+#define YAW_POSITION_INTEGRAL_LIMIT  50.0f
+#define YAW_TARGET_ANGLE_DEG         30.0f
+
+/* PITCH：位置环 PID 与固定目标角度。 */
+#define PITCH_POSITION_KP            5.0f
+#define PITCH_POSITION_KI            0.0f
+#define PITCH_POSITION_KD            0.0f
+#define PITCH_POSITION_MAX_OUTPUT    100.0f
+#define PITCH_POSITION_INTEGRAL_LIMIT 50.0f
+#define PITCH_TARGET_ANGLE_DEG       70.0f
+
+/* 速度环及前馈参数供所有闭环任务共用；前馈独立于PID状态。 */
+#define YAW_SPEED_KP                 30.0f
+#define YAW_SPEED_KI                 1.0f
+#define YAW_SPEED_KD                 0.0f
+#define YAW_SPEED_MAX_OUTPUT         6000.0f
+#define YAW_SPEED_INTEGRAL_LIMIT     3000.0f
+#define YAW_VELOCITY_FF_GAIN         15.0f /* GM6020 voltage command per rpm；需实机整定。 */
+
+#define PITCH_SPEED_KP               30.0f
+#define PITCH_SPEED_KI               1.0f
+#define PITCH_SPEED_KD               0.0f
+#define PITCH_SPEED_MAX_OUTPUT       6000.0f
+#define PITCH_SPEED_INTEGRAL_LIMIT   3000.0f
+#define PITCH_VELOCITY_FF_GAIN       15.0f
+
 /* 双轴闭环接口：逻辑轴与当前工程拨码对应，不能与其他电机任务同时调度。 */
 typedef enum { YAW_MOTOR = 0, PITCH_MOTOR, MOTOR_AXIS_COUNT } Motor_ID;
 #define MOTOR_YAW_CAN_ID 1U
 #define MOTOR_PITCH_CAN_ID 2U
-#define MOTOR_CONTROL_SPEED_LIMIT_RPM 10.0f
+#define MOTOR_CONTROL_SPEED_LIMIT_RPM 30.0f
 #define MOTOR_YAW_MIN_DEG 0.0f
 #define MOTOR_YAW_MAX_DEG 180.0f
 #define MOTOR_PITCH_MIN_DEG 55.0f
@@ -67,8 +103,8 @@ typedef struct
     float kp;
     float ki;
     float kd;
-    float max_output;     /* PID 总输出限幅，单位为电压原始控制码。 */
-    float integral_limit; /* 积分项输出限幅，与总输出限幅独立。 */
+    float max_output;     /* 位置环为 rpm，速度环为电压原始控制码。 */
+    float integral_limit; /* I 项输出限幅，与本环输出同单位。 */
 } PID_Config_t;
 
 typedef struct
@@ -90,6 +126,7 @@ typedef struct
     Motor_ControlMode mode;
     uint8_t reference_valid;
     float actual_angle_deg, target_angle_deg, target_speed_rpm;
+    float speed_pid_output, velocity_ff_output; /* 电压原始控制码，求和前各自独立。 */
     int16_t voltage_command;
 } Motor_ControlStatus;
 
@@ -101,15 +138,20 @@ void Motor_Control_Init(const PID_Config_t angle_config[MOTOR_AXIS_COUNT],
                         const PID_Config_t speed_config[MOTOR_AXIS_COUNT]);
 void Motor_Control_ReadFeedback(void);
 const Motor_ControlStatus *Motor_Get_Status(Motor_ID motor);
-/* speed 单位 rpm，限制到 ±10rpm；绝不是电压控制码1000。
+/* speed 为浮点 rpm，按 MOTOR_CONTROL_SPEED_LIMIT_RPM 限幅；非有限速度停止两轴。
  * angle 单位度，YAW [0,180]，PITCH [55,145]；非有限角度停止两轴。
  * Set 仅登记目标，Update 才计算闭环并提交完整控制帧。 */
-void Motor_Set_Speed(Motor_ID motor, int16_t speed);
+void Motor_Set_Speed(Motor_ID motor, float speed);
+float Motor_Generate_Sine_Speed(float amplitude_rpm, float frequency_hz, float time_s);
 void Motor_Set_Angle(Motor_ID motor, float angle);
-/* 位置 PID 控制目标入口；复用角度限幅。先设置两轴目标，再统一调用
- * Motor_Control_Update(dt_s) 计算两轴 PID 并提交一帧，避免槽位互相覆盖。 */
+/* 每轴独立设置前馈系数，单位为电压原始控制码/rpm；默认 0。
+ * 无效轴或非有限系数被忽略；速度模式和位置串级模式共用。 */
+void Motor_Set_Velocity_Feedforward_Gain(Motor_ID motor, float gain);
+/* 位置目标入口；复用角度限幅。先设置两轴目标，再统一调用
+ * Motor_Control_Update(dt_s) 计算位置/速度串级与前馈并提交一帧。 */
 void Motor_PID_Control(Motor_ID motor, float target_angle);
 float Motor_Get_Angle(Motor_ID motor); /* 无临时参考/无效轴返回 NaN，在线状态另查。 */
+float Get_Current_Angle(Motor_ID motor); /* 统一位置反馈入口，当前返回编码器角度。 */
 HAL_StatusTypeDef Motor_Control_Update(float dt_s);
 void Motor_Control_Stop(void); /* 清目标模式、输出和 PID 历史，不提交 CAN。 */
 

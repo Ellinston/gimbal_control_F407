@@ -111,7 +111,11 @@ int main(void)
     puts("PASS all feedback IDs, angle endpoints, signed fields, invalid DLC/angle, stale/wrapped tick");
 
     int16_t command[4] = {25000, -25000, 1, -1};
-    const uint8_t expected[8] = {0x0B, 0xB8, 0xF4, 0x48, 0, 1, 0xFF, 0xFF};
+    const uint16_t positive_limit = (uint16_t)MOTOR_VOLTAGE_SAFE_LIMIT;
+    const uint16_t negative_limit = (uint16_t)(-MOTOR_VOLTAGE_SAFE_LIMIT);
+    const uint8_t expected[8] = {
+        (uint8_t)(positive_limit >> 8), (uint8_t)positive_limit,
+        (uint8_t)(negative_limit >> 8), (uint8_t)negative_limit, 0, 1, 0xFF, 0xFF};
     tx_result = HAL_OK;
     assert(motor_Tx(1U, command) == HAL_OK && sent_id == 0x1FFU);
     assert(memcmp(sent_data, expected, 8U) == 0);
@@ -123,11 +127,13 @@ int main(void)
     assert(motor_Tx(1U, NULL) == HAL_ERROR && motor_Tx(5U, command) == HAL_ERROR);
     assert(tx_attempts == attempts);
     command[0] = 32767; assert(motor_Tx(1U, command) == HAL_OK);
-    assert(sent_data[0] == 0x0B && sent_data[1] == 0xB8);
+    assert(sent_data[0] == expected[0] && sent_data[1] == expected[1]);
     command[0] = -32768; assert(motor_Tx(1U, command) == HAL_OK);
-    assert(sent_data[0] == 0xF4 && sent_data[1] == 0x48);
-    assert(motor_LimitVoltage(INT32_MAX) == 3000 && motor_LimitVoltage(INT32_MIN) == -3000);
-    assert(motor_LimitVoltage(3000) == 3000 && motor_LimitVoltage(-3000) == -3000);
+    assert(sent_data[0] == expected[2] && sent_data[1] == expected[3]);
+    assert(motor_LimitVoltage(INT32_MAX) == MOTOR_VOLTAGE_SAFE_LIMIT &&
+           motor_LimitVoltage(INT32_MIN) == -MOTOR_VOLTAGE_SAFE_LIMIT);
+    assert(motor_LimitVoltage(MOTOR_VOLTAGE_SAFE_LIMIT) == MOTOR_VOLTAGE_SAFE_LIMIT &&
+           motor_LimitVoltage(-MOTOR_VOLTAGE_SAFE_LIMIT) == -MOTOR_VOLTAGE_SAFE_LIMIT);
     assert(motor_LimitVoltage(1250) == 1250 && motor_LimitVoltage(-1250) == -1250);
     assert(motor_LimitVoltage(0) == 0 && motor_LimitVoltage(100) == 100);
     command[0] = 0; command[3] = 0;
