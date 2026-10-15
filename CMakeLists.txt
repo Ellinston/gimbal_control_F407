@@ -53,6 +53,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     Bsp/usart/usart.c
     Bsp/can/can.c
+    Bsp/Algorithm/gravity_estimator.c
+    Bsp/Algorithm/gimbal_level.c
     Bsp/Algorithm/pid.c
     Bsp/Algorithm/velocity_feedforward.c
     Task/can_test.c

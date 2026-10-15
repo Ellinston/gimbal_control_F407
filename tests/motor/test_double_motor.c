@@ -4,12 +4,15 @@
 #include "usart.h"
 #include "usart_test.h"
 #include "velocity_feedforward.h"
+#include "imu_test.h"
+#include "imu_level_config.h"
 #include <assert.h>
 #include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 
 UART_HandleTypeDef huart1 = {HAL_UART_STATE_READY};
 static uint32_t tick, attempts, aborts;
@@ -659,120 +662,162 @@ static void test_serial_position(void)
 }
 
 
+/* Independent physical chain Rx(base roll)*Ry(base pitch)*Rz(joint yaw)*Ry(joint pitch).
+ * Inverse elementary rotations produce sensor observations; no solver helper. */
+static float base_roll, base_pitch;
+static void stabilize_observation(float yaw_joint, float pitch_joint)
+{
+    const double rad=3.141592653589793/180.0;
+    double br=base_roll*rad,bp=base_pitch*rad,y=yaw_joint*rad,p=pitch_joint*rad;
+    double x=-sin(bp)*cos(br),v=sin(br),z=cos(bp)*cos(br);
+    double rx=cos(y)*x+sin(y)*v,ry=-sin(y)*x+cos(y)*v;
+    imu_attitude_snapshot=(IMU_AttitudeSnapshot){.valid=1,.sample_ms=tick,
+        .up_sensor={(float)(cos(p)*rx-sin(p)*z),(float)ry,(float)(sin(p)*rx+cos(p)*z)}};
+}
 static void stabilize_sample(float yaw_joint, float pitch_joint, int16_t yaw_rpm, int16_t pitch_rpm)
 {
     tick += MOTOR_TASK_TX_PERIOD_MS;
-    inject(YAW_MOTOR, yaw_joint, yaw_rpm);
-    inject(PITCH_MOTOR, pitch_joint, pitch_rpm);
-    huart1.gState = HAL_UART_STATE_READY;
-    IMU_Stabilize_Task.Update();
+    inject(YAW_MOTOR,yaw_joint,yaw_rpm);inject(PITCH_MOTOR,pitch_joint,pitch_rpm);
+    stabilize_observation(yaw_joint,pitch_joint);
+    huart1.gState=HAL_UART_STATE_READY;IMU_Stabilize_Task.Update();
 }
-
-static void stabilize_start(uint32_t now, float yaw, float pitch)
+static void stabilize_config(void)
 {
-    reset(now);
-    mock_imu_yaw = yaw; mock_imu_pitch = pitch;
-    mock_usart_fault_count = 0U;
-    IMU_Stabilize_Task.Init();
-    stabilize_sample(0.0f, 0.0f, 0, 0);
+    imu_level_config=(GimbalLevelConfig)IMU_LEVEL_CONFIG_INITIALIZER;
+    /* Synthetic fixture uses its own identity mounting and joint directions,
+     * independent of the measured installation in the application config. */
+    for (unsigned i=0; i<3; ++i) for (unsigned j=0; j<3; ++j)
+    { imu_level_config.sensor_to_top[i][j]=(i==j)?1.0f:0.0f; }
+    imu_level_config.platform_up_top[0]=imu_level_config.platform_up_top[1]=0.0f;
+    imu_level_config.platform_up_top[2]=1.0f;
+    imu_level_config.zero_deg[0]=imu_level_config.zero_deg[1]=0;
+    imu_level_config.direction[0]=imu_level_config.direction[1]=1;
+    imu_level_config.calibrated=1;
 }
-
+static void stabilize_start(uint32_t now,float roll,float pitch)
+{
+    reset(now);stabilize_config();base_roll=roll;base_pitch=pitch;
+    mock_imu_yaw=mock_imu_pitch=NAN; /* proves legacy getters/VOFA are not control inputs */
+    mock_usart_fault_count=0U;imu_attitude_snapshot=(IMU_AttitudeSnapshot){0};
+    IMU_Stabilize_Task.Init();stabilize_sample(0,0,0,0);
+}
+static double platform_error(float yaw,float pitch)
+{
+    /* Forward normal in world, independent of inverse observation above. */
+    double r=3.141592653589793/180.0;
+    double x=cos(yaw*r)*sin(pitch*r),y=sin(yaw*r)*sin(pitch*r),z=cos(pitch*r);
+    double bx=cos(base_pitch*r)*x+sin(base_pitch*r)*z;
+    double bz=-sin(base_pitch*r)*x+cos(base_pitch*r)*z;
+    double wy=cos(base_roll*r)*y-sin(base_roll*r)*bz;
+    double wz=sin(base_roll*r)*y+cos(base_roll*r)*bz;
+    return atan2(hypot(bx,wy),wz)/r;
+}
 static void test_imu_stabilize(void)
 {
-    const float level = 1.483491f;
-    stabilize_start(0U, NAN, NAN);
-    for (uint32_t i = 0U; i < 220U; ++i)
+    reset(0);imu_level_config=(GimbalLevelConfig)IMU_LEVEL_CONFIG_INITIALIZER;
+    imu_level_config.calibrated=0;
+    IMU_Stabilize_Task.Init();tick+=10;IMU_Stabilize_Task.Update();zero();
+    assert(double_motor_status.state==DOUBLE_MOTOR_LEVEL_ERROR);
+    assert(double_motor_status.level_result==LEVEL_CONFIG_INVALID);
+    stabilize_config();IMU_Stabilize_Task.Init();imu_attitude_snapshot.valid=0;
+    for(unsigned i=0;i<220;++i)
     {
-        stabilize_sample(0.0f, 0.0f, 0, 0);
-        assert(double_motor_status.state == DOUBLE_MOTOR_WAIT_FEEDBACK);
-        zero();
+        tick+=10;inject(0,0,0);inject(1,0,0);IMU_Stabilize_Task.Update();zero();
+        assert(double_motor_status.state==DOUBLE_MOTOR_WAIT_FEEDBACK);
     }
-    mock_imu_yaw = 179.0f; mock_imu_pitch = 20.0f;
-    stabilize_sample(0.0f, 0.0f, 0, 0);
-    assert(double_motor_status.state == DOUBLE_MOTOR_RUNNING);
-    assert(double_motor_status.yaw_target_deg == 179.0f);
-    assert(double_motor_status.pitch_target_deg == level);
-    stabilize_sample(0.0f, 0.0f, 0, 0);
-    assert(Motor_Get_Status(YAW_MOTOR)->mode == MOTOR_CONTROL_IMU_ANGLE);
-    assert(Motor_Get_Status(PITCH_MOTOR)->mode == MOTOR_CONTROL_IMU_ANGLE);
-    assert(Motor_Get_Status(PITCH_MOTOR)->target_angle_deg == level);
-    assert(Motor_Get_Output(PITCH_MOTOR) < 0.0f);
-    assert(Motor_Get_Output(YAW_MOTOR) == 0.0f);
-    mock_imu_pitch = -17.852837f;
-    stabilize_sample(0.0f, 0.0f, 0, 0);
-    assert(Motor_Get_Output(PITCH_MOTOR) > 0.0f);
-    mock_imu_pitch = level; mock_imu_yaw = -179.0f;
-    stabilize_sample(0.0f, 0.0f, 0, 0);
-    assert(fabsf(Motor_Get_Status(YAW_MOTOR)->target_speed_rpm + 2.0f * YAW_POSITION_KP) < 0.001f);
-    assert(submitted_command(YAW_MOTOR) < 0);
-    assert(submitted_command(PITCH_MOTOR) == Motor_Get_Status(PITCH_MOTOR)->voltage_command);
-    puts("PASS IMU: wait calibration, automatic heading capture, level target without encoder clamp, same-sign correction and Yaw wrap");
-
-    /* Synthetic relative-joint plant: IMU observes joint angle + moving base.
-     * This checks that changing base tilt is rejected rather than holding the encoder.
-     * The motor model is illustrative; it does not certify physical tuning. */
-    stabilize_start(0U, 0.0f, level + 15.0f);
-    float joint[2] = {0}, rpm[2] = {0};
-    float base_pitch = 15.0f, base_yaw = 0.0f;
-    for (uint32_t i = 0U; i < 1500U; ++i)
+    base_roll=15;base_pitch=-10;
+    stabilize_sample(0,0,0,0);stabilize_sample(0,0,0,0);
+    assert(double_motor_status.state==DOUBLE_MOTOR_RUNNING);
+    for(unsigned i=0;i<2;++i) { assert(Motor_Get_Status((Motor_ID)i)->mode==MOTOR_CONTROL_ANGLE); }
+    assert(Motor_Get_Output(YAW_MOTOR)>0 && Motor_Get_Output(PITCH_MOTOR)>0);
+    assert(fabsf(double_motor_status.yaw_target_deg-.2f)<.001);
+    assert(fabsf(double_motor_status.pitch_target_deg-100.2f)<.001);
+    for(unsigned i=0;i<2;++i)
     {
-        if (i == 500U) { base_pitch = -12.0f; }
-        if (i == 900U) { base_yaw = 3.0f; }
-        mock_imu_pitch = level + base_pitch + joint[PITCH_MOTOR];
-        mock_imu_yaw = base_yaw + joint[YAW_MOTOR];
-        stabilize_sample(joint[YAW_MOTOR], joint[PITCH_MOTOR],
-            (int16_t)lroundf(rpm[YAW_MOTOR]), (int16_t)lroundf(rpm[PITCH_MOTOR]));
-        assert(double_motor_status.state == DOUBLE_MOTOR_RUNNING);
-        for (uint32_t id = 0U; id < MOTOR_AXIS_COUNT; ++id)
+        const Motor_ControlStatus *axis=Motor_Get_Status((Motor_ID)i);
+        float expected=(axis->target_angle_deg-axis->actual_angle_deg)*
+            (i==0?YAW_POSITION_KP:PITCH_POSITION_KP);
+        assert(fabsf(axis->target_speed_rpm-expected)<.001);
+        assert(fabsf(axis->velocity_ff_output-expected*(i==0?YAW_VELOCITY_FF_GAIN:PITCH_VELOCITY_FF_GAIN))<.001);
+        assert(submitted_command((Motor_ID)i)==axis->voltage_command);
+    }
+    puts("PASS leveling: uncalibrated config blocked; wait gravity; encoder PID + rpm + feedforward + unified CAN");
+
+    /* Plant is illustrative, not a validated motor model or physical tuning. */
+    stabilize_start(0,15,-10);float joint[2]={0},rpm[2]={0};
+    for(unsigned i=0;i<2400;++i)
+    {
+        if(i==800 || i==1600)
         {
-            assert(fabsf(Motor_Get_Output((Motor_ID)id)) <= MOTOR_VOLTAGE_SAFE_LIMIT);
-            rpm[id] += 0.1f * (Motor_Get_Output((Motor_ID)id) / 15.0f - rpm[id]);
-            joint[id] += rpm[id] * 0.06f;
+            printf("plant %u: joint %.4f %.4f goal %.4f %.4f error %.4f\n",i,
+                (double)joint[0],(double)joint[1],(double)double_motor_status.level_goal_yaw_deg,
+                (double)double_motor_status.level_goal_pitch_deg,platform_error(joint[0],joint[1]));
+            assert(platform_error(joint[0],joint[1])<1);
+            base_roll=i==800?0:-18;base_pitch=i==800?12:-8;
+        }
+        stabilize_sample(joint[0],joint[1],(int16_t)lroundf(rpm[0]),(int16_t)lroundf(rpm[1]));
+        assert(double_motor_status.state==DOUBLE_MOTOR_RUNNING);
+        for(unsigned j=0;j<2;++j)
+        {
+            float output=Motor_Get_Output((Motor_ID)j);assert(fabsf(output)<=MOTOR_VOLTAGE_SAFE_LIMIT);
+            rpm[j]+=.1f*(output/15.0f-rpm[j]);joint[j]+=rpm[j]*.06f;
         }
     }
-    assert(fabsf(mock_imu_pitch - level) < 1.0f && fabsf(mock_imu_yaw) < 1.0f);
-    assert(joint[PITCH_MOTOR] > 10.0f && joint[YAW_MOTOR] < -2.0f);
-    printf("PASS synthetic disturbance: Pitch error %.3f deg, Yaw error %.3f deg; encoder joints moved %.2f/%.2f deg\n",
-        (double)(mock_imu_pitch - level), (double)mock_imu_yaw, (double)joint[YAW_MOTOR], (double)joint[PITCH_MOTOR]);
+    double error=platform_error(joint[0],joint[1]);assert(error<1);
+    printf("PASS independent 3D base/joint plant: mixed/Pitch/opposite Roll; final normal error %.4f deg\n",error);
+    mock_usart_feed((const uint8_t *)"ST",2);IMU_Stabilize_Task.Update();
+    assert(double_motor_status.state==DOUBLE_MOTOR_RUNNING);
+    mock_usart_feed((const uint8_t *)"OP\r\n",4);IMU_Stabilize_Task.Update();zero();
+    stabilize_sample(joint[0],joint[1],0,0);zero();assert(double_motor_status.state==DOUBLE_MOTOR_STOPPED);
 
-    mock_usart_feed((const uint8_t *)"ST", 2U); IMU_Stabilize_Task.Update();
-    assert(double_motor_status.state == DOUBLE_MOTOR_RUNNING);
-    mock_usart_feed((const uint8_t *)"OP\r\n", 4U); IMU_Stabilize_Task.Update(); zero();
-    assert(double_motor_status.state == DOUBLE_MOTOR_STOPPED);
-    stabilize_sample(joint[YAW_MOTOR], joint[PITCH_MOTOR], 0, 0); zero();
-    assert(double_motor_status.state == DOUBLE_MOTOR_STOPPED);
-
-    stabilize_start(0U, 0.0f, level);
-    stabilize_sample(0.0f, 0.0f, 0, 0);
-    mock_imu_pitch = NAN;
-    stabilize_sample(0.0f, 0.0f, 0, 0); zero();
-    assert(double_motor_status.state == DOUBLE_MOTOR_IMU_ERROR);
-    mock_imu_pitch = level; stabilize_sample(0.0f, 0.0f, 0, 0); zero();
-    assert(double_motor_status.state == DOUBLE_MOTOR_IMU_ERROR);
-
-    stabilize_start(0U, 0.0f, level);
-    stabilize_sample(0.0f, 0.0f, 0, 0);
-    tick += 101U; IMU_Stabilize_Task.Update(); zero();
-    assert(double_motor_status.state == DOUBLE_MOTOR_FEEDBACK_LOST);
-
-    stabilize_start(0U, 0.0f, level);
-    tx_result = HAL_BUSY;
-    stabilize_sample(0.0f, 0.0f, 0, 0);
-    assert(double_motor_status.state == DOUBLE_MOTOR_TX_ERROR);
-    tx_result = HAL_OK; ++tick; IMU_Stabilize_Task.Update(); zero();
-
-    stabilize_start(UINT32_MAX - 5U, 30.0f, level);
-    stabilize_sample(0.0f, 0.0f, 0, 0);
-    assert(double_motor_status.state == DOUBLE_MOTOR_RUNNING);
-    mock_usart_feed((const uint8_t *)"SET 50 120\n", 11U); IMU_Stabilize_Task.Update();
-    assert(double_motor_status.yaw_target_deg == 30.0f && double_motor_status.pitch_target_deg == level);
-    imu_stabilize_stop_requested = 1U; IMU_Stabilize_Task.Update(); zero();
-    assert(double_motor_status.state == DOUBLE_MOTOR_STOPPED);
-    puts("PASS IMU: split STOP latch, invalid/stale sensor stop, CAN loss/TX failure, wrap tick, rejected encoder SET and debugger stop");
+    stabilize_start(0,0,0);stabilize_sample(0,0,0,0);imu_attitude_snapshot.valid=0;
+    ++tick;IMU_Stabilize_Task.Update();zero();assert(double_motor_status.state==DOUBLE_MOTOR_IMU_ERROR);
+    stabilize_sample(0,0,0,0);zero();assert(double_motor_status.state==DOUBLE_MOTOR_IMU_ERROR);
+    stabilize_start(0,0,0);stabilize_sample(0,0,0,0);imu_attitude_snapshot.up_sensor[0]=NAN;
+    ++tick;IMU_Stabilize_Task.Update();zero();assert(double_motor_status.state==DOUBLE_MOTOR_IMU_ERROR);
+    stabilize_start(0,0,0);stabilize_sample(0,0,0,0);imu_attitude_snapshot.sample_ms=tick-101;
+    ++tick;IMU_Stabilize_Task.Update();zero();assert(double_motor_status.state==DOUBLE_MOTOR_IMU_ERROR);
+    stabilize_start(0,0,0);stabilize_sample(0,0,0,0);
+    tick+=10;inject(0,0,0);inject(1,0,0);imu_attitude_snapshot.sample_ms=tick-40;
+    IMU_Stabilize_Task.Update();zero();assert(double_motor_status.state==DOUBLE_MOTOR_LEVEL_ERROR);
+    stabilize_start(0,0,0);stabilize_sample(0,0,0,0);
+    tick+=101;stabilize_observation(0,0);IMU_Stabilize_Task.Update();zero();
+    assert(double_motor_status.state==DOUBLE_MOTOR_FEEDBACK_LOST);
+    stabilize_start(0,0,0);stabilize_sample(0,0,0,0);
+    tick+=10;inject(0,0,0);length[0]=7;inject(1,0,0);stabilize_observation(0,0);
+    IMU_Stabilize_Task.Update();zero();assert(double_motor_status.state==DOUBLE_MOTOR_RX_ERROR);
+    stabilize_start(0,0,0);tx_result=HAL_BUSY;stabilize_sample(0,0,0,0);
+    assert(double_motor_status.state==DOUBLE_MOTOR_TX_ERROR);
+    tx_result=HAL_OK;++tick;IMU_Stabilize_Task.Update();zero();
+    stabilize_start(0,0,0);tx_result=HAL_ERROR;stabilize_sample(0,0,0,0);
+    assert(double_motor_status.state==DOUBLE_MOTOR_TX_ERROR);
+    tx_result=HAL_OK;++tick;IMU_Stabilize_Task.Update();zero();assert(aborts>0);
+    stabilize_start(0,0,70);stabilize_sample(0,0,0,0);zero();
+    assert(double_motor_status.state==DOUBLE_MOTOR_LEVEL_ERROR && double_motor_status.level_result==LEVEL_UNREACHABLE);
+    base_pitch=0;stabilize_sample(0,0,0,0);zero();assert(double_motor_status.state==DOUBLE_MOTOR_LEVEL_ERROR);
+    stabilize_start(0,0,0);tick+=101;inject(0,0,0);inject(1,0,0);stabilize_observation(0,0);
+    IMU_Stabilize_Task.Update();zero();assert(double_motor_status.state==DOUBLE_MOTOR_CONTROL_LATE);
+    stabilize_start(0,0,0);stabilize_sample(170,0,0,0);stabilize_sample(200,0,0,0);zero();
+    assert(double_motor_status.state==DOUBLE_MOTOR_ANGLE_LIMIT);
+    stabilize_start(0,0,0);++mock_usart_fault_count;IMU_Stabilize_Task.Update();zero();
+    assert(double_motor_status.state==DOUBLE_MOTOR_SERIAL_ERROR);
+    stabilize_start(UINT32_MAX-5U,0,0);stabilize_sample(0,0,0,0);
+    mock_usart_feed((const uint8_t *)"SET 50 120\n",11);IMU_Stabilize_Task.Update();
+    assert(double_motor_status.yaw_target_deg==0 && double_motor_status.pitch_target_deg==100);
+    imu_stabilize_stop_requested=1;IMU_Stabilize_Task.Update();zero();assert(double_motor_status.state==DOUBLE_MOTOR_STOPPED);
+    /* Boot at arbitrary physical joints: startup 0/100 is NOT geometric zero. */
+    reset(0);stabilize_config();base_roll=base_pitch=0;IMU_Stabilize_Task.Init();
+    stabilize_sample(27,-12,0,0);stabilize_sample(27,-12,0,0);
+    assert(double_motor_status.state==DOUBLE_MOTOR_RUNNING);
+    assert(fabsf(double_motor_status.level_goal_pitch_deg-112)<.05);
+    assert(fabsf(double_motor_status.level_goal_yaw_deg)<.05);
+    puts("PASS IMU invalid/NaN/stale/skew, feedback loss/malformed, TX busy/error, limit/late/unreachable, STOP/serial locks, tick wrap and absolute-zero startup conversion");
 }
 
+static void test_abort(int sig) { (void)sig; _Exit(1); }
 int main(void)
 {
+    signal(SIGABRT,test_abort); /* No Windows crash-report dialog in host CI. */
     setvbuf(stdout, NULL, _IONBF, 0);
 #ifdef _WIN32
     _set_error_mode(_OUT_TO_STDERR);

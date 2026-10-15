@@ -20,17 +20,31 @@ void Task_IMU_Init_Test(void);
 /* 原始物理量测试，保留供单独切换验证；不要与角度测试同时调度。 */
 void Task_IMU_Data_Test(void);
 
-/* 二轴卡尔曼姿态测试：主循环反复调用，上电静止约 2 秒标定。
- * Pitch 为重力参考角，Yaw 为标定后归零的相对角，单位 deg。
- * 默认芯片 X 向前、Y 为 Pitch 轴、水平时 Z 向上；假设无 Roll。
- * 更新 imu_vofa_data；文本启用时每0.5秒输出一行。
- * 首次包含初始化检查，异常不输出旧角度。 */
+/* Three-axis gravity observer. Stationary gyro calibration takes ~2 s.
+ * Actual startup tilt initializes gravity; startup is NOT a level reference.
+ * Right handed sensor axes; roll=atan2(ay,az), pitch=atan2(-ax,hypot(ay,az)).
+ * Existing Yaw remains the relative integral of gyro projected on vertical,
+ * not Roll, absolute heading or general ZYX Euler yaw. Units: degrees.
+ * Publishes a snapshot then derives VOFA fields. Installation requires calibration. */
 void IMU_Angle_Test(void);
 
 /* 只读最新解算结果，不采样；标定未完成、读取错误或超过100ms返回NaN。
- * 单位deg：Yaw为标定后相对角，Pitch为重力参考角，均在[-180,180)。 */
+ * 单位deg：Yaw为标定后相对角，Pitch为重力参考角，Yaw在[-180,180)，Pitch在[-90,90]。 */
 float imu_test_get_yaw_angle(void);
 float imu_test_get_pitch_angle(void);
+
+/* Main-loop shared data: copy once, check valid AND unsigned age <=100 ms.
+ * No ISR consumers. Add synchronization if moved to concurrent tasks.
+ * up_sensor is unit UP, the negative of physical gravitational acceleration. */
+typedef struct
+{
+    float up_sensor[3];
+    float roll_deg, pitch_deg, yaw_deg;
+    float accel_roll_deg, accel_pitch_deg, accel_weight;
+    uint32_t sample_ms, sensor_time;
+    uint8_t valid;
+} IMU_AttitudeSnapshot;
+extern IMU_AttitudeSnapshot imu_attitude_snapshot;
 
 /* 主循环反复调用，当前调度 IMU_Angle_Test。 */
 void IMU_Test(void);

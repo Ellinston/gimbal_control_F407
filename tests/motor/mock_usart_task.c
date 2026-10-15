@@ -31,3 +31,5 @@ uint16_t usart_Rx(uint8_t *buffer, uint16_t capacity)
 float mock_imu_yaw = NAN, mock_imu_pitch = NAN;
 float imu_test_get_yaw_angle(void) { return mock_imu_yaw; }
 float imu_test_get_pitch_angle(void) { return mock_imu_pitch; }
+
+IMU_AttitudeSnapshot imu_attitude_snapshot;

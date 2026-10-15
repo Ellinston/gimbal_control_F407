@@ -1,4 +1,5 @@
 #include "imu_test.h"
+#include "gravity_estimator.h"
 #include "main.h"
 #include "BMI270driver.h"
 #include "BMI270reg.h"
@@ -344,56 +345,28 @@ void Task_IMU_Data_Test(void)
     }
 }
 
-/* 第五步：以下算法仅用于无 Roll 的二轴测试，全部保留在 Task 层。
- * BMI270_read -> 物理量一维卡尔曼 -> Pitch 角度/零偏卡尔曼 + Yaw 积分。
- * 不输出或控制 Roll，不将加速度伪装成 Yaw 的绝对观测。 */
-#define IMU_GRAVITY_MS2 9.80665f
+/* Task owns timing/publication; Bsp/Algorithm owns gravity/bias mathematics. */
+#define IMU_GRAVITY_MS2 GRAVITY_MS2
 #define IMU_RAD_TO_DEG 57.2957795131f
 #define IMU_DEG_TO_RAD 0.0174532925199f
-#define IMU_CALIBRATION_SAMPLES 200U
-#define IMU_CALIBRATION_GYRO_MAX_RADS 0.15f
-#define IMU_CALIBRATION_GYRO_VARIANCE 0.0001f /* (rad/s)^2，初始静止判据。 */
-#define IMU_MAX_SAMPLE_TICKS 1280U /* 50 ms；超过后重新静止标定，不能补积分。 */
+#define IMU_CALIBRATION_SAMPLES GRAVITY_CALIBRATION_SAMPLES
+#define IMU_MAX_SAMPLE_TICKS 1280U
 #define IMU_SENSOR_TICK_S 0.0000390625f
-#define IMU_ACCEL_Q 0.5f  /* 连续过程噪声：(m/s^2)^2/s。 */
-#define IMU_ACCEL_R 0.04f /* 测量方差：(m/s^2)^2。 */
-#define IMU_GYRO_Q 0.05f  /* 连续过程噪声：(rad/s)^2/s。 */
-#define IMU_GYRO_R 0.0001f /* 测量方差：(rad/s)^2。 */
-#define IMU_PITCH_Q 0.1f  /* deg^2/s。初始测试参数，尚未实机调优。 */
-#define IMU_PITCH_BIAS_Q 0.003f /* (deg/s)^2/s。 */
-#define IMU_PITCH_R 1.0f  /* 加速度倾角测量方差 deg^2。 */
 
 typedef struct
 {
-    float value;
-    float variance;
-} IMU_ScalarKalman;
-
-typedef struct
-{
-    float angle_deg;
-    float bias_dps;
-    float p00, p01, p10, p11;
-} IMU_PitchKalman;
-
-/* 调试器观察输入/输出和计数，串口正常只输出 Pitch/Yaw。 */
-typedef struct
-{
-    float pitch_deg, yaw_deg, accel_pitch_deg;
-    float filtered_accel_ms2[3], filtered_gyro_rads[3];
+    float pitch_deg, roll_deg, yaw_deg, accel_pitch_deg, accel_roll_deg;
     float gyro_bias_rads[3];
     uint32_t calibration_samples, samples, errors, not_ready, gap_resets;
     uint32_t last_sample_ms;
     uint8_t ready, read_status;
 } IMU_AngleTestResults;
-
-static volatile IMU_AngleTestResults imu_angle;
-static IMU_ScalarKalman angle_accel_filter[3], angle_gyro_filter[3];
-static IMU_PitchKalman pitch_filter;
-static float calibration_mean[3], calibration_m2[3];
+static IMU_AngleTestResults imu_angle;
+static GravityEstimator gravity_estimator;
 static uint32_t angle_last_sensor_time, angle_last_read_ms, angle_last_print_ms;
 static uint8_t angle_started, angle_have_time;
 static float angle_accel_ms2[2];
+IMU_AttitudeSnapshot imu_attitude_snapshot;
 
 static uint8_t IMU_AngleDataAvailable(uint32_t now)
 {
@@ -401,197 +374,72 @@ static uint8_t IMU_AngleDataAvailable(uint32_t now)
         (imu_angle.read_status == BMI270_NO_ERROR || imu_angle.read_status == BMI270_NOT_READY) &&
         (uint32_t)(now - imu_angle.last_sample_ms) <= 100U);
 }
-
 float imu_test_get_yaw_angle(void)
 {
-    return imu_angle.ready && IMU_AngleDataAvailable(HAL_GetTick()) ? imu_angle.yaw_deg : NAN;
+    return imu_attitude_snapshot.valid &&
+        (uint32_t)(HAL_GetTick()-imu_attitude_snapshot.sample_ms)<=100U ? imu_attitude_snapshot.yaw_deg : NAN;
 }
-
 float imu_test_get_pitch_angle(void)
 {
-    return imu_angle.ready && IMU_AngleDataAvailable(HAL_GetTick()) ? imu_angle.pitch_deg : NAN;
+    return imu_attitude_snapshot.valid &&
+        (uint32_t)(HAL_GetTick()-imu_attitude_snapshot.sample_ms)<=100U ? imu_attitude_snapshot.pitch_deg : NAN;
 }
-
 static void IMU_UpdateVofaData(uint32_t now)
 {
+    IMU_AttitudeSnapshot snapshot = {0};
+    snapshot.sample_ms=imu_angle.last_sample_ms;
+    snapshot.sensor_time=angle_last_sensor_time;
+    snapshot.valid=imu_angle.ready && IMU_AngleDataAvailable(now);
+    snapshot.pitch_deg=imu_angle.pitch_deg; snapshot.roll_deg=imu_angle.roll_deg;
+    snapshot.yaw_deg=imu_angle.yaw_deg;
+    snapshot.accel_pitch_deg=imu_angle.accel_pitch_deg;
+    snapshot.accel_roll_deg=imu_angle.accel_roll_deg;
+    snapshot.accel_weight=gravity_estimator.accel_weight;
+    for (uint32_t i=0; i<3; ++i) { snapshot.up_sensor[i]=gravity_estimator.up_sensor[i]; }
+    imu_attitude_snapshot=snapshot;
     imu_vofa_data = (imu_vofa_data_t){NAN, NAN, NAN, NAN};
     if (!IMU_AngleDataAvailable(now)) { return; }
     imu_vofa_data.accel_x = angle_accel_ms2[0];
     imu_vofa_data.accel_y = angle_accel_ms2[1];
-    if (imu_angle.ready)
+    if (snapshot.valid)
     {
-        imu_vofa_data.pitch_angle = imu_angle.pitch_deg;
-        imu_vofa_data.yaw_angle = imu_angle.yaw_deg;
+        imu_vofa_data.pitch_angle = snapshot.pitch_deg;
+        imu_vofa_data.yaw_angle = snapshot.yaw_deg;
     }
 }
-
-static float IMU_WrapDegrees(float angle)
-{
-    /* 本任务单步变化有界，结果保持 [-180, 180)。 */
-    while (angle >= 180.0f) { angle -= 360.0f; }
-    while (angle < -180.0f) { angle += 360.0f; }
-    return angle;
-}
-
-static float IMU_KalmanPhysical(IMU_ScalarKalman *filter, float measured,
-                                float q, float r, float dt_s)
-{
-    float predicted_variance = filter->variance + q * dt_s;
-    float gain = predicted_variance / (predicted_variance + r);
-    filter->value += gain * (measured - filter->value);
-    filter->variance = (1.0f - gain) * predicted_variance;
-    return filter->value;
-}
-
-static float IMU_KalmanPitch(float accel_angle_deg, float rate_dps,
-                              float dt_s, uint8_t use_accel)
-{
-    IMU_PitchKalman *f = &pitch_filter;
-    f->angle_deg = IMU_WrapDegrees(f->angle_deg + dt_s * (rate_dps - f->bias_dps));
-    f->p00 += dt_s * (dt_s * f->p11 - f->p01 - f->p10 + IMU_PITCH_Q);
-    f->p01 -= dt_s * f->p11;
-    f->p10 -= dt_s * f->p11;
-    f->p11 += IMU_PITCH_BIAS_Q * dt_s;
-
-    /* 明显平移/自由落体时只预测，不用非重力加速度拉偏角度。 */
-    if (use_accel)
-    {
-        float innovation = IMU_WrapDegrees(accel_angle_deg - f->angle_deg);
-        float s = f->p00 + IMU_PITCH_R;
-        float k0 = f->p00 / s;
-        float k1 = f->p10 / s;
-        float p00 = f->p00, p01 = f->p01;
-        f->angle_deg = IMU_WrapDegrees(f->angle_deg + k0 * innovation);
-        f->bias_dps += k1 * innovation;
-        f->p00 -= k0 * p00;
-        f->p01 -= k0 * p01;
-        f->p10 -= k1 * p00;
-        f->p11 -= k1 * p01;
-    }
-    return f->angle_deg;
-}
-
 static void IMU_AngleRestart(void)
 {
-    imu_angle.ready = 0U;
-    imu_angle.calibration_samples = 0U;
-    for (uint32_t axis = 0U; axis < 3U; ++axis)
-    {
-        calibration_mean[axis] = 0.0f;
-        calibration_m2[axis] = 0.0f;
-    }
+    Gravity_Reset(&gravity_estimator);
+    imu_angle.ready = 0U; imu_angle.calibration_samples = 0U;
+    imu_attitude_snapshot.valid=0U;
 }
-
 static void IMU_AngleSample(const float accel[3], const float gyro[3],
                              uint32_t sensor_time, uint32_t now_ms)
 {
-    float accel_norm2 = 0.0f, gyro_norm2 = 0.0f;
     uint32_t ticks = (sensor_time - angle_last_sensor_time) & 0x00FFFFFFU;
     for (uint32_t axis = 0U; axis < 3U; ++axis)
     {
         if (!isfinite(accel[axis]) || !isfinite(gyro[axis]))
-        {
-            ++imu_angle.errors;
-            angle_have_time = 0U;
-            IMU_AngleRestart();
-            return;
-        }
-        accel_norm2 += accel[axis] * accel[axis];
-        gyro_norm2 += gyro[axis] * gyro[axis];
+        { ++imu_angle.errors; angle_have_time=0U; IMU_AngleRestart(); return; }
     }
-    if (angle_have_time && (ticks == 0U)) { return; } /* 重复样本不积分。 */
-    angle_accel_ms2[0] = accel[0];
-    angle_accel_ms2[1] = accel[1];
-    if (angle_have_time && (ticks > IMU_MAX_SAMPLE_TICKS))
-    {
-        ++imu_angle.gap_resets;
-        IMU_AngleRestart();
-    }
-    angle_have_time = 1U;
-    angle_last_sensor_time = sensor_time;
-    imu_angle.last_sample_ms = now_ms;
-    ++imu_angle.samples;
-
-    uint8_t gravity_valid =
-        (accel_norm2 > 0.81f * IMU_GRAVITY_MS2 * IMU_GRAVITY_MS2) &&
-        (accel_norm2 < 1.21f * IMU_GRAVITY_MS2 * IMU_GRAVITY_MS2);
-    if (!imu_angle.ready)
-    {
-        /* 必须让板静止；阈值/方差只能排除明显运动，不能识别所有匀速慢转。 */
-        if (!gravity_valid ||
-            (gyro_norm2 > IMU_CALIBRATION_GYRO_MAX_RADS * IMU_CALIBRATION_GYRO_MAX_RADS))
-        {
-            IMU_AngleRestart();
-            return;
-        }
-        uint32_t n = ++imu_angle.calibration_samples;
-        for (uint32_t axis = 0U; axis < 3U; ++axis)
-        {
-            float delta = gyro[axis] - calibration_mean[axis];
-            calibration_mean[axis] += delta / (float)n;
-            calibration_m2[axis] += delta * (gyro[axis] - calibration_mean[axis]);
-            /* 在标定期间先稳定加速度，启动 Pitch 不依赖单个噪声样本。 */
-            if (n == 1U)
-            {
-                angle_accel_filter[axis] = (IMU_ScalarKalman){accel[axis], IMU_ACCEL_R};
-            }
-            else
-            {
-                (void)IMU_KalmanPhysical(&angle_accel_filter[axis], accel[axis],
-                                         IMU_ACCEL_Q, IMU_ACCEL_R,
-                                         (float)ticks * IMU_SENSOR_TICK_S);
-            }
-        }
-        if (n < IMU_CALIBRATION_SAMPLES) { return; }
-        for (uint32_t axis = 0U; axis < 3U; ++axis)
-        {
-            if (calibration_m2[axis] / (float)(n - 1U) > IMU_CALIBRATION_GYRO_VARIANCE)
-            {
-                IMU_AngleRestart();
-                return;
-            }
-        }
-        for (uint32_t axis = 0U; axis < 3U; ++axis)
-        {
-            imu_angle.gyro_bias_rads[axis] = calibration_mean[axis];
-            angle_gyro_filter[axis] = (IMU_ScalarKalman){0.0f, IMU_GYRO_R};
-        }
-        pitch_filter = (IMU_PitchKalman){
-            .angle_deg = atan2f(-angle_accel_filter[0].value,
-                                angle_accel_filter[2].value) * IMU_RAD_TO_DEG,
-            .p00 = 1.0f, .p11 = 0.1f
-        };
-        imu_angle.pitch_deg = pitch_filter.angle_deg;
-        imu_angle.yaw_deg = 0.0f; /* 标定完成时方向为 Yaw 零点。 */
-        imu_angle.ready = 1U;
-        return;
-    }
-
-    float dt_s = (float)ticks * IMU_SENSOR_TICK_S;
-    float filtered_accel[3], filtered_gyro[3];
-    float previous_pitch_deg = imu_angle.pitch_deg;
-    for (uint32_t axis = 0U; axis < 3U; ++axis)
-    {
-        filtered_accel[axis] = IMU_KalmanPhysical(&angle_accel_filter[axis], accel[axis],
-                                                 IMU_ACCEL_Q, IMU_ACCEL_R, dt_s);
-        filtered_gyro[axis] = IMU_KalmanPhysical(&angle_gyro_filter[axis],
-            gyro[axis] - imu_angle.gyro_bias_rads[axis], IMU_GYRO_Q, IMU_GYRO_R, dt_s);
-        imu_angle.filtered_accel_ms2[axis] = filtered_accel[axis];
-        imu_angle.filtered_gyro_rads[axis] = filtered_gyro[axis];
-    }
-    imu_angle.accel_pitch_deg = atan2f(-filtered_accel[0], filtered_accel[2]) * IMU_RAD_TO_DEG;
-    imu_angle.pitch_deg = IMU_KalmanPitch(imu_angle.accel_pitch_deg,
-                                         filtered_gyro[1] * IMU_RAD_TO_DEG,
-                                         dt_s, gravity_valid);
-
-    /* 无 Roll 时，机体中的世界竖直方向为 [-sin(Pitch), 0, cos(Pitch)]。
-     * 将陀螺仪投影到竖直方向；倾斜时不能直接把 gyro Z 当作 Yaw 角速度。
-     * 该二轴投影避免除以 cos(Pitch)，但不适用于存在 Roll 的自由三轴运动。 */
-    float midpoint_pitch_rad = (previous_pitch_deg +
-        0.5f * IMU_WrapDegrees(imu_angle.pitch_deg - previous_pitch_deg)) * IMU_DEG_TO_RAD;
-    float yaw_rate_rads = -filtered_gyro[0] * sinf(midpoint_pitch_rad) +
-                          filtered_gyro[2] * cosf(midpoint_pitch_rad);
-    imu_angle.yaw_deg = IMU_WrapDegrees(imu_angle.yaw_deg + yaw_rate_rads * dt_s * IMU_RAD_TO_DEG);
+    if (angle_have_time && ticks == 0U) { return; }
+    if (angle_have_time && (ticks > IMU_MAX_SAMPLE_TICKS ||
+        (uint32_t)(now_ms-imu_angle.last_sample_ms)>50U))
+    { ++imu_angle.gap_resets; IMU_AngleRestart(); ticks=256U; }
+    if (!angle_have_time) { ticks=256U; }
+    angle_have_time=1U; angle_last_sensor_time=sensor_time;
+    imu_angle.last_sample_ms=now_ms; ++imu_angle.samples;
+    angle_accel_ms2[0]=accel[0]; angle_accel_ms2[1]=accel[1];
+    if (!Gravity_Update(&gravity_estimator,accel,gyro,(float)ticks*IMU_SENSOR_TICK_S))
+    { ++imu_angle.errors; IMU_AngleRestart(); return; }
+    imu_angle.ready=gravity_estimator.ready;
+    imu_angle.calibration_samples=gravity_estimator.calibration_samples;
+    imu_angle.roll_deg=gravity_estimator.roll_deg;
+    imu_angle.pitch_deg=gravity_estimator.pitch_deg;
+    imu_angle.yaw_deg=gravity_estimator.yaw_deg;
+    imu_angle.accel_roll_deg=gravity_estimator.accel_roll_deg;
+    imu_angle.accel_pitch_deg=gravity_estimator.accel_pitch_deg;
+    for (uint32_t i=0; i<3; ++i) { imu_angle.gyro_bias_rads[i]=gravity_estimator.gyro_bias_rads[i]; }
 }
 
 static void IMU_FormatDegrees(char *text, size_t capacity, float degrees)

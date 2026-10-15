@@ -49,7 +49,7 @@ UART_HandleTypeDef huart1;
 SPI_HandleTypeDef hspi1;
 
 /* USER CODE BEGIN PV */
-/* 自稳：PITCH保持水平，YAW保持启用朝向；可切回Serial_Position_Task或Sine_Speed_Task。 */
+/* 重力方向双轴找平；安装/机械标定无效时自稳任务锁止并发送零帧。 */
 static const Task_Interface_t * const motor_test = &IMU_Stabilize_Task;
 /* USER CODE END PV */
 

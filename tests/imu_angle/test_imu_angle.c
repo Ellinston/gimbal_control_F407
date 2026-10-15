@@ -75,12 +75,13 @@ HAL_StatusTypeDef usart_Tx(const uint8_t *data, uint16_t length)
     return HAL_OK;
 }
 
+static float IMU_WrapDegrees(float x) { return remainderf(x,360.0f); }
+
 static void reset_test(void)
 {
     imu_angle = (IMU_AngleTestResults){0};
-    pitch_filter = (IMU_PitchKalman){0};
-    memset(angle_accel_filter, 0, sizeof(angle_accel_filter));
-    memset(angle_gyro_filter, 0, sizeof(angle_gyro_filter));
+    Gravity_Reset(&gravity_estimator);
+    imu_attitude_snapshot=(IMU_AttitudeSnapshot){0};
     angle_have_time = angle_started = 0U;
     angle_last_sensor_time = angle_last_read_ms = angle_last_print_ms = 0U;
     mock_ms = mock_sensor_time = read_calls = tx_calls = init_calls = 0U;
@@ -167,11 +168,13 @@ static void test_yaw_and_wrap(void)
                (double)pitch_cases[c]);
     }
     reset_test();
-    calibrate(179);
+    for (unsigned i=0;i<IMU_CALIBRATION_SAMPLES;++i) { sample(179,0,0,0); }
+    assert(imu_angle.ready && fabsf(imu_angle.pitch_deg-1.0f)<0.001f);
     for (uint32_t i = 1; i <= 50U; ++i) { sample(179.0f + 0.04f * (float)i, 4, 0, 0); }
     for (uint32_t i = 0; i < 300U; ++i) { sample(181, 0, 0, 0); }
-    assert(fabsf(IMU_WrapDegrees(imu_angle.pitch_deg + 179.0f)) < 0.2f);
-    puts("PASS Pitch crossing +/-180 deg");
+    assert(fabsf(imu_angle.pitch_deg + 1.0f) < 0.2f);
+    assert(gravity_estimator.up_sensor[2]<-0.99f);
+    puts("PASS inverted gravity crossing 180 deg (Pitch uses canonical +/-90 deg)");
 }
 
 static void test_rejection_and_gaps(void)
