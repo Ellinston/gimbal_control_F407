@@ -129,6 +129,7 @@ typedef struct
     float actual_angle_deg, target_angle_deg, target_speed_rpm;
     float speed_pid_output, velocity_ff_output; /* 电压原始控制码，求和前各自独立。 */
     int16_t voltage_command;
+    float base_velocity_ff_rpm; /* Base disturbance compensation, before speed limit. */
 } Motor_ControlStatus;
 
 /* Task 传入两轴各自的位置/速度 PID 配置，数组按 Motor_ID 索引，初始化时复制。
@@ -152,6 +153,8 @@ void Motor_Set_IMU_Angle(Motor_ID motor, float angle);
 /* 每轴独立设置前馈系数，单位为电压原始控制码/rpm；默认 0。
  * 无效轴或非有限系数被忽略；速度模式和位置串级模式共用。 */
 void Motor_Set_Velocity_Feedforward_Gain(Motor_ID motor, float gain);
+/* Add to position-loop target rpm; Init/Stop clear it. Invalid input stops both axes. */
+void Motor_Set_Base_Velocity_Feedforward(Motor_ID motor, float speed_rpm);
 /* 位置目标入口；复用角度限幅。先设置两轴目标，再统一调用
  * Motor_Control_Update(dt_s) 计算位置/速度串级与前馈并提交一帧。 */
 void Motor_PID_Control(Motor_ID motor, float target_angle);

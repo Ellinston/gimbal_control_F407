@@ -58,6 +58,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Bsp/Algorithm/pid.c
     Bsp/Algorithm/velocity_feedforward.c
     Task/can_test.c
+    Task/m3508_task.c
+    device/m3508/c620_demo_pid.c
     Task/motor_test.c
     Task/usart_test.c
     Task/imu_test.c
@@ -75,6 +77,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     Task
     device/BMI270
     device/motor
+    device/m3508
 )
 
 # Add project symbols (macros)
@@ -91,4 +94,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 
     # Add user defined libraries
 )
+
+# newlib-nano 默认省略浮点格式化；FireWater 的 snprintf("%.2f") 需要显式链接。
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE -u _printf_float)
 

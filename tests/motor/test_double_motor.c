@@ -679,6 +679,12 @@ static void stabilize_sample(float yaw_joint, float pitch_joint, int16_t yaw_rpm
     tick += MOTOR_TASK_TX_PERIOD_MS;
     inject(YAW_MOTOR,yaw_joint,yaw_rpm);inject(PITCH_MOTOR,pitch_joint,pitch_rpm);
     stabilize_observation(yaw_joint,pitch_joint);
+    /* With a fixed base, the top gyro must include both moving joints. */
+    float p=pitch_joint*0.0174532925199f;
+    float yaw_rads=(float)yaw_rpm*0.10471975512f;
+    imu_attitude_snapshot.gyro_sensor_rads[0]=-sinf(p)*yaw_rads;
+    imu_attitude_snapshot.gyro_sensor_rads[1]=(float)pitch_rpm*0.10471975512f;
+    imu_attitude_snapshot.gyro_sensor_rads[2]=cosf(p)*yaw_rads;
     huart1.gState=HAL_UART_STATE_READY;IMU_Stabilize_Task.Update();
 }
 static void stabilize_config(void)
@@ -814,6 +820,60 @@ static void test_imu_stabilize(void)
     puts("PASS IMU invalid/NaN/stale/skew, feedback loss/malformed, TX busy/error, limit/late/unreachable, STOP/serial locks, tick wrap and absolute-zero startup conversion");
 }
 
+static void test_base_velocity_feedforward(void)
+{
+    assert(calculate_base_velocity_ff(3,3)==0);
+    assert(calculate_base_velocity_ff(2,0)==-2);
+    assert(calculate_base_velocity_ff(0,-2)==-2);
+    assert(isnan(calculate_base_velocity_ff(NAN,0)));
+    assert(isnan(calculate_base_velocity_ff(FLT_MAX,-FLT_MAX)));
+    stabilize_start(0,0,0);
+    stabilize_sample(0,20,2,-3);
+    assert(fabsf(Motor_Get_Status(YAW_MOTOR)->base_velocity_ff_rpm)<.01f);
+    assert(fabsf(Motor_Get_Status(PITCH_MOTOR)->base_velocity_ff_rpm)<.01f);
+    /* Add independently prescribed base rotation to the top gyro. */
+    tick+=10;inject(0,0,2);inject(1,20,-3);stabilize_observation(0,20);
+    float p=20*0.0174532925199f, yaw_rads=2.7f*0.10471975512f;
+    imu_attitude_snapshot.gyro_sensor_rads[0]=-sinf(p)*yaw_rads;
+    imu_attitude_snapshot.gyro_sensor_rads[1]=-4.3f*0.10471975512f;
+    imu_attitude_snapshot.gyro_sensor_rads[2]=cosf(p)*yaw_rads;
+    IMU_Stabilize_Task.Update();
+    assert(double_motor_status.state==DOUBLE_MOTOR_RUNNING);
+    assert(fabsf(Motor_Get_Status(YAW_MOTOR)->base_velocity_ff_rpm+.7f)<.01f);
+    assert(fabsf(Motor_Get_Status(PITCH_MOTOR)->base_velocity_ff_rpm-1.3f)<.01f);
+    Motor_Set_Base_Velocity_Feedforward(YAW_MOTOR,1000);
+    Motor_Set_Angle(YAW_MOTOR,180);
+    assert(Motor_Control_Update(.01f)==HAL_OK);
+    assert(Motor_Get_Status(YAW_MOTOR)->target_speed_rpm==MOTOR_CONTROL_SPEED_LIMIT_RPM);
+    Task_IMU_Stabilize_Test_Stop();zero();
+    assert(Motor_Get_Status(YAW_MOTOR)->base_velocity_ff_rpm==0);
+    assert(Motor_Get_Status(PITCH_MOTOR)->base_velocity_ff_rpm==0);
+    stabilize_start(0,0,0);stabilize_sample(0,0,0,0);
+    imu_attitude_snapshot.gyro_sensor_rads[0]=NAN;
+    ++tick;IMU_Stabilize_Task.Update();zero();
+    assert(double_motor_status.state==DOUBLE_MOTOR_IMU_ERROR);
+    puts("PASS base-rate FF: joint-motion cancellation, tilted axes, compensating sign, rpm clamp, STOP and invalid gyro");
+    /* Independent nonidentity mounting and reversed Pitch encoder direction. */
+    reset(0);stabilize_config();base_roll=base_pitch=0;
+    imu_level_config.sensor_to_top[0][0]=imu_level_config.sensor_to_top[1][1]=0;
+    imu_level_config.sensor_to_top[0][1]=-1;
+    imu_level_config.sensor_to_top[1][0]=1;
+    imu_level_config.direction[1]=-1;
+    IMU_Stabilize_Task.Init();
+    for (unsigned k=0;k<2;++k)
+    {
+        tick+=10;inject(0,0,2);inject(1,0,-3);stabilize_observation(0,0);
+        imu_attitude_snapshot.gyro_sensor_rads[0]=4.3f*0.10471975512f;
+        imu_attitude_snapshot.gyro_sensor_rads[2]=2.7f*0.10471975512f;
+        IMU_Stabilize_Task.Update();
+    }
+    assert(double_motor_status.state==DOUBLE_MOTOR_RUNNING);
+    assert(fabsf(Motor_Get_Status(YAW_MOTOR)->base_velocity_ff_rpm+.7f)<.01f);
+    assert(fabsf(Motor_Get_Status(PITCH_MOTOR)->base_velocity_ff_rpm-1.3f)<.01f);
+    Task_IMU_Stabilize_Test_Stop();zero();
+    puts("PASS base-rate FF: rotated IMU mounting and reversed Pitch sign");
+}
+
 static void test_abort(int sig) { (void)sig; _Exit(1); }
 int main(void)
 {
@@ -935,6 +995,7 @@ int main(void)
     }
     test_serial_position();
     test_imu_stabilize();
+    test_base_velocity_feedforward();
     puts("ALL DOUBLE/FIXED/SERIAL POSITION HOST CHECKS PASSED (mock CAN/UART; not physical motion proof)");
     return 0;
 }

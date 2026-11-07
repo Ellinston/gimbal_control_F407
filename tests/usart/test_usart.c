@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <float.h>
 #include "usart.h"
 
 UART_HandleTypeDef huart1;
@@ -50,14 +51,31 @@ HAL_StatusTypeDef HAL_UART_AbortReceive(UART_HandleTypeDef *uart)
 #include "../../Bsp/usart/usart.c"
 #include "../../Task/usart_test.c"
 
-/* 本套件验证BSP异步发送和打包；电机/IMU端使用可辨认的独立数值。 */
-static Motor_ControlStatus mock_axes[MOTOR_AXIS_COUNT];
-const Motor_ControlStatus *Motor_Get_Status(Motor_ID motor) { return &mock_axes[motor]; }
-uint8_t motor_IsOnline(const Motor *motor, uint32_t now) { (void)motor; (void)now; return 1U; }
-float Get_Current_Angle(Motor_ID motor) { return motor == YAW_MOTOR ? 70.0f : 100.0f; }
-float Motor_Get_Output(Motor_ID motor) { return motor == YAW_MOTOR ? 500.0f : -1000.0f; }
-float imu_test_get_yaw_angle(void) { return imu_vofa_data.yaw_angle; }
-float imu_test_get_pitch_angle(void) { return imu_vofa_data.pitch_angle; }
+/* 联合使用实际串口 BSP、命令解析、M3508 控制/停机源码；只模拟 CAN 外设。 */
+#include "../../Task/m3508_task.c"
+static HAL_StatusTypeDef can_init_result = HAL_OK;
+static HAL_StatusTypeDef can_abort_result = HAL_OK;
+static HAL_StatusTypeDef can_tx_result = HAL_OK;
+static unsigned can_tx_calls, can_abort_calls;
+static uint8_t can_sent[8];
+HAL_StatusTypeDef can_Init(void) { return can_init_result; }
+HAL_StatusTypeDef can_Rx(uint32_t id, uint8_t *data, uint8_t *length)
+{
+    (void)id; (void)data; (void)length;
+    return HAL_BUSY; /* STOP 必须不依赖电机反馈。 */
+}
+HAL_StatusTypeDef can_AbortTx(void)
+{
+    ++can_abort_calls;
+    return can_abort_result;
+}
+HAL_StatusTypeDef can_Tx(uint32_t id, const uint8_t *data, uint8_t length)
+{
+    assert(id == 0x200U && length == sizeof(can_sent));
+    ++can_tx_calls;
+    memcpy(can_sent, data, sizeof(can_sent));
+    return can_tx_result;
+}
 
 static void feed(uint8_t value)
 {
@@ -81,61 +99,176 @@ static void finish_tx(void)
 
 static void test_vofa(void)
 {
-    const uint8_t expected[28] = {
-        0x00, 0x00, 0xA0, 0xBF, /* IMU Yaw -1.25 */
-        0x00, 0x00, 0xF0, 0x41, /* IMU Pitch 30 */
-        0x00, 0x00, 0x8C, 0x42, /* 70 */
-        0x00, 0x00, 0xC8, 0x42, /* 100 */
-        0x00, 0x00, 0xFA, 0x43, /* Yaw output 500 */
-        0x00, 0x00, 0x7A, 0xC4, /* Pitch output -1000 */
-        0x00, 0x00, 0x80, 0x7F
+    const char expected[] = "M3508:-1400.00,8000.25\n";
+    m3508_status = (M3508_Status){
+        .state = M3508_RUNNING, .init_status = HAL_OK, .feedback_count = 1U,
+        .fixed_output = -1400.0f, .output_before_limit = 8000.25f,
+        .command_raw = 6000 /* CH1 must preserve the value before clamping. */
     };
     tick = 0U; transmit_calls = 0U;
     vofa_task_init();
-    assert(isnan(imu_vofa_data.pitch_angle) && isnan(imu_vofa_data.accel_y));
-    imu_vofa_data = (imu_vofa_data_t){30.0f, -1.25f, 70.0f, 100.0f};
     for (tick = 0U; tick < 100U; tick += 10U) { vofa_task_update(); }
     assert(transmit_calls == 0U);
     vofa_task_update();
-    assert(transmit_calls == 1U && transmit_length == sizeof(expected));
-    assert(memcmp(transmit_target, expected, sizeof(expected)) == 0);
-    assert(vofa_debug_sample.pitch_angle == 30.0f && vofa_debug_sample.yaw_angle == -1.25f);
-    assert(vofa_debug_sample.accel_x == 70.0f && vofa_debug_sample.accel_y == 100.0f);
-    /* 仅在主机测试控制台打印，不会进入固件 USART1 数据流。 */
-    printf("IMU test snapshot: Pitch=%.2f Yaw=%.2f AccelX=%.2f AccelY=%.2f\n",
-           (double)vofa_debug_sample.pitch_angle, (double)vofa_debug_sample.yaw_angle,
-           (double)vofa_debug_sample.accel_x, (double)vofa_debug_sample.accel_y);
-    printf("JustFloat bytes (%u):", (unsigned)transmit_length);
-    for (uint16_t i = 0U; i < transmit_length; ++i) { printf(" %02X", (unsigned)transmit_target[i]); }
-    puts("");
+    assert(transmit_calls == 1U && transmit_length == sizeof(expected) - 1U);
+    assert(memcmp(transmit_target, expected, transmit_length) == 0);
     /* 同一时刻重复调用，以及连续两周期发送未结束，不能覆盖活动帧。 */
-    imu_vofa_data.yaw_angle = 42.0f;
+    m3508_status.fixed_output = 0.0f;
+    m3508_status.output_before_limit = -123.5f;
     vofa_task_update();
     tick = 200U; vofa_task_update();
     tick = 300U; vofa_task_update();
     assert(transmit_calls == 1U && vofa_tx_dropped == 2U);
-    assert(memcmp(transmit_target, expected, sizeof(expected)) == 0);
+    assert(memcmp(transmit_target, expected, sizeof(expected) - 1U) == 0);
     huart1.gState = HAL_UART_STATE_READY;
     tick = 310U; vofa_task_update(); assert(transmit_calls == 1U);
     tick = 400U; vofa_task_update();
-    float actual;
-    memcpy(&actual, transmit_target + 0U, sizeof(actual));
-    assert(transmit_calls == 2U && actual == 42.0f);
+    const char changed[] = "M3508:0.00,-123.50\n";
+    assert(transmit_calls == 2U && transmit_length == sizeof(changed) - 1U);
+    assert(memcmp(transmit_target, changed, transmit_length) == 0);
     huart1.gState = HAL_UART_STATE_READY;
     transmit_result = HAL_ERROR; tick = 500U; vofa_task_update();
     assert(vofa_tx_status == HAL_ERROR && vofa_tx_dropped == 3U);
     transmit_result = HAL_OK; tick = 600U; vofa_task_update();
     assert(transmit_calls == 3U && vofa_tx_submitted == 3U);
-    uint8_t snapshot[28]; memcpy(snapshot, transmit_target, sizeof(snapshot));
+    uint8_t snapshot[64];
+    const uint16_t snapshot_length = transmit_length;
+    memcpy(snapshot, transmit_target, snapshot_length);
     tick = UINT32_MAX - 49U; vofa_task_init();
-    assert(memcmp(snapshot, transmit_target, sizeof(snapshot)) == 0);
+    assert(memcmp(snapshot, transmit_target, snapshot_length) == 0);
     huart1.gState = HAL_UART_STATE_READY;
     tick = 49U; vofa_task_update(); assert(transmit_calls == 3U);
     tick = 50U; vofa_task_update(); assert(transmit_calls == 4U);
-    memcpy(&actual, transmit_target + 0U, sizeof(actual)); assert(isnan(actual));
+    assert(memcmp(transmit_target, changed, sizeof(changed) - 1U) == 0);
     huart1.gState = HAL_UART_STATE_READY;
-    puts("PASS VOFA: exact 28-byte six-channel JustFloat, channel order, 100ms cadence, busy buffer lifetime,");
-    puts("           dropped periods, TX error recovery, reinitialization and tick wrap.");
+
+    /* STOP 仅抑制新包，不改写已经提交的缓冲区。 */
+    m3508_status.state = M3508_STOPPED;
+    tick += 100U; vofa_task_update(); assert(transmit_calls == 4U);
+    assert(memcmp(transmit_target, changed, sizeof(changed) - 1U) == 0);
+    m3508_status.state = M3508_RUNNING;
+    m3508_status.init_status = HAL_ERROR;
+    tick += 100U; vofa_task_update(); assert(transmit_calls == 4U);
+    m3508_status.init_status = HAL_OK;
+    m3508_status.feedback_count = 0U;
+    tick += 100U; vofa_task_update(); assert(transmit_calls == 4U);
+    m3508_status.feedback_count = 1U;
+
+    /* 串口接收启动失败时不输出，恢复后无需电脑先发数据即可输出。 */
+    rx_running = 0U; huart1.RxState = HAL_UART_STATE_READY;
+    receive_result = HAL_ERROR;
+    tick += 100U; vofa_task_update(); assert(transmit_calls == 4U);
+    receive_result = HAL_OK;
+    tick += 100U; vofa_task_update(); assert(transmit_calls == 5U);
+    huart1.gState = HAL_UART_STATE_READY;
+
+    /* 超长浮点文本必须整包丢弃，不能发送截断的半行。 */
+    m3508_status.fixed_output = FLT_MAX;
+    m3508_status.output_before_limit = -FLT_MAX;
+    tick += 100U; vofa_task_update();
+    assert(transmit_calls == 5U && vofa_tx_status == HAL_ERROR);
+    m3508_status.fixed_output = 1400.25f;
+    m3508_status.output_before_limit = 2500.5f;
+    vofa_task_enable_yaw_speed(); vofa_task_enable_motor_position();
+    tick += 100U; vofa_task_update(); assert(transmit_calls == 6U);
+    const char positive[] = "M3508:1400.25,2500.50\n";
+    assert(transmit_length == sizeof(positive) - 1U);
+    assert(memcmp(transmit_target, positive, transmit_length) == 0);
+    huart1.gState = HAL_UART_STATE_READY;
+    puts("PASS VOFA: two-channel FireWater, pre-limit value, signed/zero values, 100ms cadence,");
+    puts("           busy buffer lifetime, TX/RX recovery, reinit/wrap, STOP/CAN gates and truncation.");
+}
+
+static void test_serial_stop(void)
+{
+    tick = 0U;
+    M3508_Task_Init();
+    assert(m3508_status.state == M3508_RUNNING);
+    m3508_status.command_raw = -1400;
+    m3508_status.p_output = 10.0f;
+    m3508_status.i_output = 20.0f;
+    m3508_status.fixed_output = -1400.0f;
+    m3508_status.output_before_limit = -1370.0f;
+    can_tx_calls = can_abort_calls = 0U;
+
+    /* 启动接收不依赖 CAN 成功/反馈、100ms 周期或串口发送完成。 */
+    rx_running = 0U;
+    huart1.RxState = HAL_UART_STATE_READY;
+    huart1.gState = HAL_UART_STATE_BUSY_TX;
+    receive_result = HAL_BUSY;
+    usart_send_STOP();
+    assert(can_tx_calls == 0U);
+    receive_result = HAL_OK;
+    usart_send_STOP();
+    assert(huart1.RxState == HAL_UART_STATE_BUSY_RX);
+    feed_text("\n"); usart_send_STOP(); /* 同步此前 BSP 故障后的行边界。 */
+
+    feed_text("ST"); usart_send_STOP();
+    assert(m3508_status.state == M3508_RUNNING);
+    feed_text("OP"); usart_send_STOP();
+    assert(m3508_status.state == M3508_RUNNING); /* 没有换行，尚非完整命令。 */
+    feed_text("\n"); usart_send_STOP();
+    assert(tick == 0U && m3508_status.state == M3508_STOPPED);
+    assert(can_abort_calls == 1U && can_tx_calls == 1U);
+    assert(m3508_status.command_raw == 0 && m3508_status.p_output == 0.0f);
+    assert(m3508_status.i_output == 0.0f && m3508_status.fixed_output == 0.0f);
+    assert(m3508_status.output_before_limit == 0.0f);
+    for (unsigned i = 0U; i < sizeof(can_sent); ++i) { assert(can_sent[i] == 0U); }
+    tick = 10U; M3508_Task_Update();
+    assert(m3508_status.state == M3508_STOPPED && m3508_status.command_raw == 0);
+
+    /* 非完整匹配、嵌入NUL、超长行均不得误触发，下一条合法命令仍可接收。 */
+    unsigned aborts_before = can_abort_calls;
+    feed_text("XSTOP\nSTOPX\nstop\n\nSTOP\rX\n"); usart_send_STOP();
+    const uint8_t embedded_nul[] = {'S','T','O','P',0U,'X','\n'};
+    for (unsigned i = 0U; i < sizeof(embedded_nul); ++i) { feed(embedded_nul[i]); }
+    usart_send_STOP();
+    for (unsigned i = 0U; i < 80U; ++i) { feed('X'); }
+    feed_text("STOP\n");
+    usart_send_STOP(); usart_send_STOP(); usart_send_STOP();
+    assert(can_abort_calls == aborts_before);
+    feed_text("STOP\r"); usart_send_STOP();
+    assert(can_abort_calls == aborts_before);
+    feed_text("\nSTOP\n"); usart_send_STOP();
+    assert(can_abort_calls == aborts_before + 2U);
+
+    /* 接收中断出错后，不能把错误前后的碎片拼成 STOP。 */
+    aborts_before = can_abort_calls;
+    feed_text("ST"); usart_send_STOP();
+    HAL_UART_ErrorCallback(&huart1);
+    feed_text("OP\n"); usart_send_STOP();
+    assert(can_abort_calls == aborts_before);
+    feed_text("STOP\n"); usart_send_STOP();
+    assert(can_abort_calls == aborts_before + 1U);
+
+    /* CAN旧邮箱未取消完成时先清零控制量，Update 后续重试，只发送零帧。 */
+    M3508_Task_Init();
+    m3508_status.command_raw = -1400;
+    can_abort_result = HAL_BUSY;
+    unsigned tx_before = can_tx_calls;
+    feed_text("STOP\n"); usart_send_STOP();
+    assert(m3508_status.state == M3508_STOPPED && m3508_status.command_raw == 0);
+    assert(abort_pending == 1U && can_tx_calls == tx_before);
+    tick += 10U; M3508_Task_Update(); assert(can_tx_calls == tx_before);
+    can_abort_result = HAL_OK;
+    tick += 10U; M3508_Task_Update();
+    assert(abort_pending == 0U && can_tx_calls == tx_before + 1U);
+    for (unsigned i = 0U; i < sizeof(can_sent); ++i) { assert(can_sent[i] == 0U); }
+
+    /* CAN初始化失败也能锁住 STOP；恢复通信后不能自动回到 RUNNING。 */
+    can_init_result = HAL_ERROR; M3508_Task_Init();
+    feed_text("STOP\n"); usart_send_STOP();
+    assert(m3508_status.state == M3508_STOPPED);
+    can_init_result = HAL_OK;
+    tick += 10U; M3508_Task_Update();
+    assert(m3508_status.state == M3508_STOPPED && m3508_status.command_raw == 0);
+
+    /* 重新初始化恢复正常启动，不持久保存本次停机。 */
+    M3508_Task_Init();
+    assert(m3508_status.state == M3508_RUNNING && m3508_stop_requested == 0U);
+    huart1.gState = HAL_UART_STATE_READY;
+    puts("PASS serial STOP: real IRQ/RX/parser/M3508 stop, split/LF/CRLF, malformed lines,");
+    puts("                  busy UART/no CAN feedback, RX recovery, mailbox retry, zero frames and reinit.");
 }
 
 int main(void)
@@ -235,6 +368,7 @@ int main(void)
     puts("PASS: RX start/retry, bounds, overflow, wrap, 4096 cycles, TX busy/lifetime,");
     puts("      IRQ mask, callback routing, error recovery, split/burst/invalid/long PING lines.");
     test_vofa();
+    test_serial_stop();
     return 0;
 }
 

@@ -357,6 +357,7 @@ typedef struct
 {
     float pitch_deg, roll_deg, yaw_deg, accel_pitch_deg, accel_roll_deg;
     float gyro_bias_rads[3];
+    float gyro_sensor_rads[3];
     uint32_t calibration_samples, samples, errors, not_ready, gap_resets;
     uint32_t last_sample_ms;
     uint8_t ready, read_status;
@@ -395,7 +396,11 @@ static void IMU_UpdateVofaData(uint32_t now)
     snapshot.accel_pitch_deg=imu_angle.accel_pitch_deg;
     snapshot.accel_roll_deg=imu_angle.accel_roll_deg;
     snapshot.accel_weight=gravity_estimator.accel_weight;
-    for (uint32_t i=0; i<3; ++i) { snapshot.up_sensor[i]=gravity_estimator.up_sensor[i]; }
+    for (uint32_t i=0; i<3; ++i)
+    {
+        snapshot.up_sensor[i]=gravity_estimator.up_sensor[i];
+        snapshot.gyro_sensor_rads[i]=imu_angle.gyro_sensor_rads[i];
+    }
     imu_attitude_snapshot=snapshot;
     imu_vofa_data = (imu_vofa_data_t){NAN, NAN, NAN, NAN};
     if (!IMU_AngleDataAvailable(now)) { return; }
@@ -430,6 +435,7 @@ static void IMU_AngleSample(const float accel[3], const float gyro[3],
     angle_have_time=1U; angle_last_sensor_time=sensor_time;
     imu_angle.last_sample_ms=now_ms; ++imu_angle.samples;
     angle_accel_ms2[0]=accel[0]; angle_accel_ms2[1]=accel[1];
+    //计算
     if (!Gravity_Update(&gravity_estimator,accel,gyro,(float)ticks*IMU_SENSOR_TICK_S))
     { ++imu_angle.errors; IMU_AngleRestart(); return; }
     imu_angle.ready=gravity_estimator.ready;
@@ -439,7 +445,11 @@ static void IMU_AngleSample(const float accel[3], const float gyro[3],
     imu_angle.yaw_deg=gravity_estimator.yaw_deg;
     imu_angle.accel_roll_deg=gravity_estimator.accel_roll_deg;
     imu_angle.accel_pitch_deg=gravity_estimator.accel_pitch_deg;
-    for (uint32_t i=0; i<3; ++i) { imu_angle.gyro_bias_rads[i]=gravity_estimator.gyro_bias_rads[i]; }
+    for (uint32_t i=0; i<3; ++i)
+    {
+        imu_angle.gyro_bias_rads[i]=gravity_estimator.gyro_bias_rads[i];
+        imu_angle.gyro_sensor_rads[i]=gyro[i]-gravity_estimator.gyro_bias_rads[i];
+    }
 }
 
 static void IMU_FormatDegrees(char *text, size_t capacity, float degrees)

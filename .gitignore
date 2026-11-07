@@ -1,8 +1,22 @@
-# Build outputs and local caches
-/build/
-/cmake-build-*/
-/Debug/
-/Release/
+# Publish only source, build configuration and host tests at the repository root.
+/*
+!/.gitignore
+!/README.md
+!/Bsp/
+!/Core/
+!/device/
+!/Drivers/
+!/Task/
+!/cmake/
+!/tests/
+!/CMakeLists.txt
+!/CMakePresets.json
+!/gimbal_1.ioc
+!/openocd.cfg
+!/startup_stm32f407xx.s
+!/STM32F407XX_FLASH.ld
+
+# Build outputs and local caches inside allowed directories
 *.o
 *.obj
 *.elf
@@ -13,14 +27,4 @@
 __pycache__/
 
 # Local IDE and agent settings
-/.idea/
-/.opencode/
 CMakeUserPresets.json
-
-# Local backups, experiments and reference attachments
-/backups/
-/tmp/
-/说明书/*.pdf
-/说明书/*.docx
-/说明书/*.png
-/说明书/*.eprj2

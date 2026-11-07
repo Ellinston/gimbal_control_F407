@@ -275,6 +275,9 @@ static void test_vofa_integration(void)
     sample(20.0f, 0.0f, 10.0f, 0.0f);
     mock_read_status = BMI270_NOT_READY;
     IMU_Angle_Test();
+    assert(fabsf(imu_attitude_snapshot.gyro_sensor_rads[0]+10.0f*IMU_DEG_TO_RAD*sinf(20.0f*IMU_DEG_TO_RAD))<1e-6f);
+    assert(fabsf(imu_attitude_snapshot.gyro_sensor_rads[1])<1e-6f);
+    assert(fabsf(imu_attitude_snapshot.gyro_sensor_rads[2]-10.0f*IMU_DEG_TO_RAD*cosf(20.0f*IMU_DEG_TO_RAD))<1e-6f);
     imu_vofa_data_t expected = imu_vofa_data;
     assert(expected.accel_x < -3.0f && expected.accel_y == 0.0f);
     assert(imu_test_get_yaw_angle() == expected.yaw_angle);

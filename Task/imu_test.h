@@ -43,6 +43,7 @@ typedef struct
     float accel_roll_deg, accel_pitch_deg, accel_weight;
     uint32_t sample_ms, sensor_time;
     uint8_t valid;
+    float gyro_sensor_rads[3]; /* Same sample, stationary bias removed; sensor axes. */
 } IMU_AttitudeSnapshot;
 extern IMU_AttitudeSnapshot imu_attitude_snapshot;
 

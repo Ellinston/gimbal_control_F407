@@ -1,9 +1,8 @@
 #include "usart_test.h"
 #include "usart.h"
-#include "imu_test.h"
-#include "motor.h"
-#include <float.h>
+#include "m3508_task.h"
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #define VOFA_PERIOD_MS 100U
@@ -15,101 +14,138 @@ motor_channel_t pitch_channel;
 static uint32_t vofa_last_sample_ms;
 static uint8_t vofa_initialized;
 /* 必须持久保存到中断发送完成；更新前先经 BSP 确认发送空闲。 */
-static uint8_t vofa_packet[36];
-static uint8_t vofa_yaw_speed_enabled;
+static char vofa_packet[64];
 static volatile HAL_StatusTypeDef vofa_tx_status = HAL_BUSY;
 static volatile uint32_t vofa_tx_submitted, vofa_tx_dropped;
-/* 调试器查看本次IMU打包值及 vofa_packet[0..35]，不插入 printf。 */
-static volatile imu_vofa_data_t vofa_debug_sample;
+/* STOP 接收启动状态只供调试器查看，不往 VOFA 数据流中插入回复文本。 */
+static volatile HAL_StatusTypeDef stop_rx_status = HAL_BUSY;
 
-_Static_assert(sizeof(float) == 4U, "JustFloat requires 32-bit floats");
-_Static_assert(FLT_RADIX == 2 && FLT_MANT_DIG == 24 && FLT_MAX_EXP == 128 && FLT_MIN_EXP == -125,
-               "JustFloat requires binary32 float format");
-_Static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
-               "JustFloat memcpy packing requires little-endian byte order");
+void usart_send_STOP(void)
+{
+    /* 解析状态跨主循环保留：串口可能先收到 ST，下一轮才收到 OP\n。 */
+    static char command[8];
+    static uint8_t command_length, discard_line;
+    static uint32_t last_rx_fault_count;
+    uint8_t buffer[32];
+
+    /* 1. 独立启动/恢复 USART1 接收，不等待 CAN 反馈、VOFA 周期或发送空闲。
+     * 即使重新启动接收失败，仍处理队列中已有的字节；状态可在调试器查看。 */
+    stop_rx_status = usart_Start();
+    uint32_t rx_fault_count = usart_GetRxFaultCount();
+    if (rx_fault_count != last_rx_fault_count)
+    {
+        /* 丢字节/接收出错后丢弃当前行，避免把损坏的命令拼成 STOP。 */
+        last_rx_fault_count = rx_fault_count;
+        command_length = 0U;
+        discard_line = 1U;
+    }
+
+    /* 2. 每轮最多取 32 字节，不等待完整命令，不阻塞电机任务。 */
+    uint16_t length = usart_Rx(buffer, sizeof(buffer));
+    for (uint16_t i = 0U; i < length; ++i)
+    {
+        if (buffer[i] == '\n')
+        {
+            /* LF 表示一行结束；只移除末尾 CR，兼容 STOP\r\n。 */
+            if (command_length > 0U && command[command_length - 1U] == '\r')
+            {
+                --command_length;
+            }
+            command[command_length] = '\0';
+
+            /* 3. 仅完整、大写 STOP 触发完整停机流程，不直接修改 state。
+             * Stop 清零控制量并取消旧 CAN 邮箱；未完成的取消由 Update 重试。 */
+            if (!discard_line && strcmp(command, "STOP") == 0)
+            {
+                M3508_Task_Stop();
+            }
+            command_length = 0U;
+            discard_line = 0U;
+        }
+        else if (!discard_line)
+        {
+            /* 超长行或嵌入 NUL 的行整行忽略，直到下一个 LF 再重新识别。 */
+            if (buffer[i] == '\0' || command_length >= sizeof(command) - 1U)
+            {
+                discard_line = 1U;
+            }
+            else
+            {
+                command[command_length++] = (char)buffer[i];
+            }
+        }
+    }
+}
 
 void vofa_task_init(void)
 {
     imu_vofa_data = (imu_vofa_data_t){NAN, NAN, NAN, NAN};
-    vofa_debug_sample = imu_vofa_data;
-    yaw_channel = (motor_channel_t){
-        .target_angle = 0.0f, .current_angle = NAN,
-        .target_speed = 0.0f, .current_speed = NAN,
-        .velocity_ff_output = 0.0f, .speed_pid_output = 0.0f
-    };
+    /* 保留旧任务依赖的快照变量；本次 VOFA 不再输出 IMU/双轴数据。 */
+    yaw_channel = (motor_channel_t){0};
+    yaw_channel.current_angle = NAN;
+    yaw_channel.current_speed = NAN;
     pitch_channel = yaw_channel;
     vofa_last_sample_ms = usart_GetTick();
     vofa_tx_status = HAL_BUSY;
     vofa_tx_submitted = vofa_tx_dropped = 0U;
     vofa_initialized = 1U;
-    vofa_yaw_speed_enabled = 0U;
     /* 不改写 vofa_packet，重复初始化也不能破坏正在发送的帧。 */
 }
 
 void vofa_task_enable_yaw_speed(void)
 {
-    vofa_yaw_speed_enabled = 1U;
+    /* 兼容旧电机测试的调用；不再切换 VOFA 通道映射。 */
 }
 
 void vofa_task_enable_motor_position(void)
 {
-    /* 默认六路已同时包含IMU、编码器角度和两轴输出。 */
-    vofa_yaw_speed_enabled = 0U;
+    /* 兼容旧电机测试的调用；不再切换 VOFA 通道映射。 */
 }
 
 void vofa_task_update(void)
 {
+    /* 1. 按原来的 100 ms 周期采样；忙时跳过，不积压、不阻塞控制环。 */
     uint32_t now = usart_GetTick();
     if (!vofa_initialized || (uint32_t)(now - vofa_last_sample_ms) < VOFA_PERIOD_MS)
     {
         return;
     }
     vofa_last_sample_ms = now;
-    if (!usart_TxReady())
+    /* 2. M3508 任务先更新 CAN 反馈。本任务只读控制量，不再次消费 CAN 帧。
+     * feedback_count 非零表示收到过有效反馈，不表示反馈一直新鲜。
+     * 串口接收启动成功即可，不要求电脑先发数据才显示波形。 */
+    if (m3508_status.init_status != HAL_OK || m3508_status.feedback_count == 0U)
+    {
+        return;
+    }
+    if (usart_Start() != HAL_OK || !usart_TxReady())
     {
         vofa_tx_status = HAL_BUSY;
         ++vofa_tx_dropped;
         return;
     }
-    const imu_vofa_data_t sample = imu_vofa_data;
-    vofa_debug_sample = sample;
-    /* 默认六路诊断：IMU Yaw/Pitch、编码器Yaw/Pitch、最终输出Yaw/Pitch。 */
-    uint16_t tail;
-    if (vofa_yaw_speed_enabled)
+    /* 3. 用 M3508 实际停机状态替代旧的正弦速度模式开关。
+     * 停机后不提交新包；已经交给中断发送的包允许正常完成。 */
+    if (m3508_status.state != M3508_STOPPED)
     {
-        /* 保留原正弦速度测试的八路映射。 */
-        memcpy(&vofa_packet[0], &sample.pitch_angle, 4U);
-        memcpy(&vofa_packet[4], &sample.yaw_angle, 4U);
-        memcpy(&vofa_packet[8], &sample.accel_x, 4U);
-        memcpy(&vofa_packet[12], &sample.accel_y, 4U);
-        const motor_channel_t motor_sample = yaw_channel;
-        memcpy(&vofa_packet[16], &motor_sample.target_speed, 4U);
-        memcpy(&vofa_packet[20], &motor_sample.current_speed, 4U);
-        memcpy(&vofa_packet[24], &motor_sample.velocity_ff_output, 4U);
-        memcpy(&vofa_packet[28], &motor_sample.speed_pid_output, 4U);
-        tail = 32U;
+        /* 4. 同一次主循环中取两路快照，单位均为 C620 电流控制码。
+         * CH0 = 固定偏置；CH1 = P + I + 固定偏置，尚未最终限幅。 */
+        const float fixed_output = m3508_status.fixed_output;
+        const float output_before_limit = m3508_status.output_before_limit;
+        /* FireWater：ASCII，逗号分隔，换行结束；不使用 JustFloat 二进制尾。 */
+        int length = snprintf(vofa_packet, sizeof(vofa_packet), "M3508:%.2f,%.2f\n",
+                              (double)fixed_output, (double)output_before_limit);
+        if (length <= 0 || (size_t)length >= sizeof(vofa_packet))
+        {
+            vofa_tx_status = HAL_ERROR;
+            ++vofa_tx_dropped;
+            return;
+        }
+        /* 5. 异步发送；静态缓冲区在发送完成前不会改写。 */
+        vofa_tx_status = usart_Tx((const uint8_t *)vofa_packet, (uint16_t)length);
+        if (vofa_tx_status == HAL_OK) { ++vofa_tx_submitted; }
+        else { ++vofa_tx_dropped; }
     }
-    else
-    {
-        uint32_t motor_now = HAL_GetTick();
-        const Motor_ControlStatus *yaw = Motor_Get_Status(YAW_MOTOR);
-        const Motor_ControlStatus *pitch = Motor_Get_Status(PITCH_MOTOR);
-        const float channels[6] = {
-            imu_test_get_yaw_angle(), imu_test_get_pitch_angle(),
-            motor_IsOnline(&yaw->feedback, motor_now) ? Get_Current_Angle(YAW_MOTOR) : NAN,
-            motor_IsOnline(&pitch->feedback, motor_now) ? Get_Current_Angle(PITCH_MOTOR) : NAN,
-            Motor_Get_Output(YAW_MOTOR), Motor_Get_Output(PITCH_MOTOR)
-        };
-        memcpy(vofa_packet, channels, sizeof(channels));
-        tail = sizeof(channels);
-    }
-    vofa_packet[tail] = 0x00U;
-    vofa_packet[tail + 1U] = 0x00U;
-    vofa_packet[tail + 2U] = 0x80U;
-    vofa_packet[tail + 3U] = 0x7FU;
-    vofa_tx_status = usart_Tx(vofa_packet, tail + 4U);
-    if (vofa_tx_status == HAL_OK) { ++vofa_tx_submitted; }
-    else { ++vofa_tx_dropped; }
 }
 
 /* 调试器中分别观察接收启动状态、发送提交状态和错误次数。 */

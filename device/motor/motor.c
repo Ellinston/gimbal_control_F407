@@ -157,6 +157,7 @@ void Motor_Control_Stop(void)
         axes[i].target_speed_rpm = 0.0f;
         axes[i].speed_pid_output = 0.0f;
         axes[i].velocity_ff_output = 0.0f;
+        axes[i].base_velocity_ff_rpm = 0.0f;
         axes[i].voltage_command = 0;
         PID_Position_Reset(&angle_pid[i]);
         PID_Position_Reset(&speed_pid[i]);
@@ -233,6 +234,14 @@ void Motor_Set_IMU_Angle(Motor_ID motor, float angle)
     axes[motor].target_angle_deg = motor_WrapDegrees(angle);
 }
 
+void Motor_Set_Base_Velocity_Feedforward(Motor_ID motor, float speed_rpm)
+{
+    if (!valid_axis(motor)) { return; }
+    if (!isfinite(speed_rpm)) { Motor_Control_Stop(); return; }
+    axes[motor].base_velocity_ff_rpm = CLAMP(speed_rpm,
+        -MOTOR_CONTROL_SPEED_LIMIT_RPM, MOTOR_CONTROL_SPEED_LIMIT_RPM);
+}
+
 void Motor_Set_Velocity_Feedforward_Gain(Motor_ID motor, float gain)
 {
     if (!valid_axis(motor) || !isfinite(gain)) { return; }
@@ -292,7 +301,7 @@ HAL_StatusTypeDef Motor_Control_Update(float dt_s)
             float error = axis->target_angle_deg - angle_feedback[i];
             if (axis->mode == MOTOR_CONTROL_IMU_ANGLE) { error = motor_WrapDegrees(error); }
             axis->target_speed_rpm = CLAMP(PID_Position_Calculate(&angle_pid[i],
-                error, dt_s),
+                error, dt_s) + axis->base_velocity_ff_rpm,//目标转速 = 位置 PID(角度误差) + 底座运动补偿 rpm
                 -MOTOR_CONTROL_SPEED_LIMIT_RPM, MOTOR_CONTROL_SPEED_LIMIT_RPM);
         }
         if (axis->mode == MOTOR_CONTROL_ANGLE || axis->mode == MOTOR_CONTROL_IMU_ANGLE ||
